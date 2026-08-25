@@ -666,4 +666,17 @@ class TestRefusalKind:
         from dora_roi.report.methodology import refusal_kind
 
         assert refusal_kind("111122223333 iam-idp: iam:ListSAMLProviders denied (AccessDenied)") == "denied"
-        assert refusal_kind("cost explorer: NoCredentialsError: Unable to locate credentials") == "denied"
+        assert refusal_kind("111122223333 trust: iam:ListRoles denied (AccessDenied)") == "denied"
+
+    def test_cost_explorer_and_marketplace_failures_are_unavailable_not_denied(self) -> None:
+        """N1: `_collect_aws`'s own comment on its Cost Explorer catch says
+        the wrapped `AwsError` covers a missing credential, a denied
+        permission, and an unreachable region as one exception; Marketplace's
+        broadest catch (`except Exception`) takes whatever else a client or a
+        connection can do. Neither message names an AWS denial specifically,
+        so neither may render under the same heading as one."""
+        from dora_roi.report.methodology import refusal_kind
+
+        assert refusal_kind("cost explorer: NoCredentialsError: Unable to locate credentials") == "unavailable"
+        assert refusal_kind("cost explorer: AwsError: could not reach the Cost Explorer endpoint") == "unavailable"
+        assert refusal_kind("marketplace: ce:GetCostAndUsage unavailable (ConnectionError: timed out)") == "unavailable"

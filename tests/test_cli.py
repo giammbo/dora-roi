@@ -1225,6 +1225,20 @@ class TestConsolePerimeterSurface:
         assert "1 with at least one channel refused" in click_ops_line
         assert "methodology.md" in click_ops_line
 
+    def test_describe_does_not_call_a_parse_failure_refused(self) -> None:
+        """N2: a trust-policy parse failure is dora-roi's own failure, not
+        an AWS denial. Counting it into "N with at least one channel
+        refused" put a claim on the terminal that the same run's
+        methodology.md, three lines of code later, explicitly contradicts —
+        the previous count included any non-empty refusal slice, parse
+        failures included."""
+        sources = self._sweep_sources(
+            swept_accounts=[("111122223333", ["111122223333 trust: unreadable trust policy on role 'Legacy'"])]
+        )
+        lines = sources.describe()
+        click_ops_line = next(line for line in lines if line.startswith("AWS click-ops discovery"))
+        assert click_ops_line == "AWS click-ops discovery: swept 1 account(s)"
+
     def test_describe_flags_an_unreachable_account(self) -> None:
         sources = self._sweep_sources(
             swept_accounts=[], unreachable_accounts=[("555566667777", "no usable credentials (ProfileNotFound)")]
@@ -1277,7 +1291,11 @@ class TestConsolePerimeterSurface:
         output = capsys.readouterr().out
         assert "Could not parse (1)" in output
         assert "not an AWS denial" in output
-        assert "Refused" not in output
+        # N2: case-sensitive "Refused" missed the lowercase "refused" that
+        # `describe()`'s own click-ops caveat used to print for this exact
+        # scenario (counting any non-empty refusal slice, parse failures
+        # included) — this check would have passed against that bug.
+        assert "refused" not in output.lower()
 
     def test_print_perimeter_does_not_call_an_unreached_account_a_refusal(self, capsys: pytest.CaptureFixture) -> None:
         """R2: an account whose session never came up was never read at all —
@@ -1292,6 +1310,36 @@ class TestConsolePerimeterSurface:
         _print_perimeter(sources, gleif=False)
         output = capsys.readouterr().out
         assert "Named but never reached (1)" in output
+        assert "refused" not in output.lower()
+
+    def test_print_perimeter_does_not_call_a_cost_explorer_failure_a_refusal(
+        self, capsys: pytest.CaptureFixture
+    ) -> None:
+        """N1: `_collect_aws`'s own comment says the `AwsError` wrapping a
+        Cost Explorer failure covers a missing credential, a denied
+        permission, and an unreachable region as one exception — none of
+        which this text can tell apart, so it must not print under a
+        heading that claims "AWS said no to a specific action"."""
+        from dora_roi.cli import _print_perimeter
+
+        sources = self._sweep_sources(swept_accounts=[])
+        sources.clickops_refused.append("cost explorer: NoCredentialsError: Unable to locate credentials")
+        _print_perimeter(sources, gleif=False)
+        output = capsys.readouterr().out
+        assert "Unavailable (1)" in output
+        assert "cost explorer: NoCredentialsError" in output
+        assert "Refused" not in output
+
+    def test_print_perimeter_does_not_call_a_marketplace_failure_a_refusal(self, capsys: pytest.CaptureFixture) -> None:
+        """N1's other reachable shape: Marketplace's broadest catch takes
+        whatever else a client or a connection can do, not only a denial."""
+        from dora_roi.cli import _print_perimeter
+
+        sources = self._sweep_sources(swept_accounts=[])
+        sources.clickops_refused.append("marketplace: ce:GetCostAndUsage unavailable (ConnectionError: timed out)")
+        _print_perimeter(sources, gleif=False)
+        output = capsys.readouterr().out
+        assert "Unavailable (1)" in output
         assert "Refused" not in output
 
     def test_print_perimeter_never_truncates_the_refusal_list(self, capsys: pytest.CaptureFixture) -> None:

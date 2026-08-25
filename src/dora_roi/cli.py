@@ -558,8 +558,17 @@ class _Sources:
         every channel, or accounts named to sweep that were never reached at
         all. Both belong on the terminal, not only in methodology.md, because
         this line is the one every user sees on every run.
+
+        Counts only refusals `refusal_kind` calls `"denied"` — a review
+        found the previous count included any non-empty refusal list, so a
+        trust-policy parse failure alone was enough to print "1 with at
+        least one channel refused" here while `_print_refusals` (below, same
+        run) explains, correctly, that the same line is not a refusal at all
+        (N2).
         """
-        refused_count = sum(1 for _, refusals in self.swept_accounts if refusals)
+        refused_count = sum(
+            1 for _, refusals in self.swept_accounts if any(refusal_kind(r) == "denied" for r in refusals)
+        )
         base = f"AWS click-ops discovery: swept {len(self.swept_accounts)} account(s)"
         caveats = []
         if refused_count:
@@ -1247,6 +1256,13 @@ _REFUSAL_HEADINGS: dict[str, tuple[str, str]] = {
     "parse_failure": ("Could not parse", "dora-roi's own failure, not an AWS denial"),
     "not_reached": ("Named but never reached", "no session could be established"),
     "not_attempted": ("Never attempted", "no account or region was ever known to try"),
+    # `refusal_kind`'s own docstring names exactly why this bucket exists:
+    # Cost Explorer wraps a missing credential, a denied permission and an
+    # unreachable region into one exception, and Marketplace's broadest
+    # catch takes whatever else a client or a connection can do. Folding
+    # either into "Refused" (a review finding, N1) would claim more than
+    # the exception that produced the line distinguishes.
+    "unavailable": ("Unavailable", "credentials, connectivity and denials are not told apart here"),
 }
 
 

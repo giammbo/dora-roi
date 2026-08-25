@@ -103,8 +103,18 @@ def refusal_kind(line: str) -> str:
     - ``"not_attempted"`` — a channel or sweep that was never even tried,
       for a reason the message itself names (no known region, no resolved
       account list).
-    - ``"denied"`` — AWS said no to a specific action. The only kind this
-      tool's own vocabulary calls a *refusal*.
+    - ``"unavailable"`` — the Cost Explorer or Marketplace billing call
+      itself failed, for a reason this line does not narrow further:
+      `_collect_aws`'s own comment on its Cost Explorer catch (cli.py) says
+      the wrapped `AwsError` covers a missing credential, a denied
+      permission, *and* an unreachable region as one exception, and
+      `collect_marketplace`'s last `except Exception` arm (clickops.py)
+      catches whatever else a client or a connection can do. Calling either
+      shape a denial would claim more than the exception that produced it
+      distinguishes.
+    - ``"denied"`` — everything else: a per-account identity-providers,
+      trust or EventBridge call this account's own session made, where AWS
+      returned an error for that one call.
 
     Works on a raw, whole-run `clickops_refused` line (still carrying its
     `"<account> <channel>: "` prefix) and on the same line already stripped
@@ -118,6 +128,8 @@ def refusal_kind(line: str) -> str:
         return "parse_failure"
     if line.startswith(_EVENTBRIDGE_NO_REGIONS_PREFIX) or line.startswith(_AWS_SWEEP_PREFIX):
         return "not_attempted"
+    if line.startswith(_COST_EXPLORER_PREFIX) or line.startswith(_MARKETPLACE_PREFIX):
+        return "unavailable"
     return "denied"
 
 
@@ -289,18 +301,20 @@ def _accounts_swept_section(perimeter: dict[str, Any]) -> list[str]:
         "",
         "Per-account click-ops discovery — federated identity providers, cross-account "
         "trust relationships, and EventBridge partner event sources — answers a "
-        "different question for each account than a single yes/no. Three outcomes are "
-        "possible for each channel in each account: **read** (the call succeeded and "
-        "found something), **read, no result** (the call succeeded and found nothing), "
-        "and **refused** (AWS said no to a specific action, named below). The middle one "
-        "and the last one arrive as the same empty list and are opposite claims about "
-        "the world — this note is the one place they are told apart. A single provider's "
-        "document dora-roi could not retrieve, or a single role's trust policy it could not "
-        "parse, does not fail the whole channel either — both are called out on their own, "
-        "distinctly from an AWS denial. And a refusal this note could not attribute to any "
-        "of the three channels marks every otherwise-clean line **unconfirmed** instead of "
-        "read or empty, because that unattributed refusal might belong to exactly that "
-        "channel.",
+        "different question for each account than a single yes/no. The distinction this "
+        "note exists to keep: **read, no result** (the call succeeded and found nothing) "
+        "and **refused** (AWS said no to a specific action, named below) arrive as the "
+        "same empty list in memory and are opposite claims about the world. A clean "
+        "**read** (the call succeeded and found something) is a third, positive claim. "
+        "Other lines below say more precisely what happened rather than collapsing into "
+        "one of those three: a single provider's document dora-roi could not retrieve "
+        "costs that one document, not the whole channel; a single role's trust policy "
+        "dora-roi could not parse is this tool's own failure, not an AWS denial, and is "
+        "named as such; a channel with no known region says so instead of reading as a "
+        "clean read or a refusal; and a refusal this note could not attribute to any of "
+        "the three channels marks each of this account's otherwise-clean lines "
+        "**unconfirmed** instead of read or empty, because that unattributed refusal "
+        "might belong to exactly that channel.",
         "",
     ]
 
