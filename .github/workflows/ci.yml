@@ -22,12 +22,12 @@ jobs:
       matrix:
         python: ["3.11", "3.12"]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4
 
       - name: Build the check image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           target: dev
@@ -68,9 +68,9 @@ jobs:
     # every commit so far, so leaving it advisory would only mean the first
     # regression goes unnoticed.
     steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/build-push-action@v6
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/build-push-action@v7
         with:
           context: .
           target: dev
@@ -83,14 +83,14 @@ jobs:
     name: package
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v4
 
       # The shipped target is a different image from the one the checks run in:
       # it carries no dev dependencies, so a packaging mistake that the dev
       # image hides — a missing data file, an unbuildable wheel — fails here.
       - name: Build the shipped image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           target: base
@@ -110,7 +110,7 @@ jobs:
             "from dora_roi.enrichment.mapping import load_mapping; assert len(load_mapping()) >= 20"
 
       - name: The wheel builds
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           target: dev
