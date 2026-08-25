@@ -86,8 +86,11 @@ DISCLAIMER = (
     "it reaches a filing."
 )
 PERIMETER_WARNING = (
-    "Only what is described in the sources above was scanned. Anything outside them — shadow IT, "
-    "click-ops resources, contracts with no infrastructure footprint — is invisible to this tool."
+    "Every channel and account named above was read; nothing beyond them was. A vendor that leaves no "
+    "trace in any of them — a SaaS bought on a card, a contract with no infrastructure footprint at "
+    "all — is exactly as invisible to this tool as it always was: discovering more here changes how "
+    "much of the visible estate this tool can read, not the size of what it cannot. This register does "
+    "not claim to be complete."
 )
 
 console = Console()
@@ -494,6 +497,16 @@ class _Sources:
             lines = [f"Terraform state: {len(self.declared)} files"] + [f"  {w}" for w in self.declared]
         if self.aws:
             lines.append(f"AWS Organizations + Cost Explorer (profile: {self.aws_profile or 'default'})")
+            lines.append("AWS Marketplace (billing)")
+            # The other three click-ops channels — identity providers, trust
+            # relationships, partner event sources — need an `aws:` sweep
+            # block to know which accounts to visit at all; a bare `--aws`
+            # with no `--sources` file runs Marketplace alone, and this line
+            # is what stops that reading as "every AWS channel was swept".
+            if self.aws_sweep is not None:
+                lines.append(f"AWS click-ops discovery: swept {len(self.swept_accounts)} account(s)")
+            else:
+                lines.append("AWS click-ops discovery: not swept (no --sources aws: block given)")
         if self.k8s:
             lines.append(f"Kubernetes (context: {self.k8s_context or 'current'})")
         return lines
@@ -862,6 +875,21 @@ def _collect_aws(
             # An account whose session never came up was not reached, and
             # must not read as one that was reached and simply had nothing —
             # `swept_accounts`'s own docstring states this requirement.
+            #
+            # This still cannot catch every dead-credentials case: a plain
+            # profile (no `role_arn`) makes `boto3.Session(...)` succeed even
+            # when its credentials are expired or absent, because boto3 never
+            # validates them until the first call. That call then fails
+            # inside each channel instead of inside `_session()`, so it
+            # surfaces here as three ordinary per-channel refusals (`iam-idp:`,
+            # `trust:`, `eventbridge:`) rather than one `no usable credentials`
+            # one, and this account is still appended below. The methodology
+            # note is what keeps that honest: it renders each channel's state
+            # from `clickops_refused` directly, never from membership in this
+            # list alone, so an account that is "swept" but refused on every
+            # channel still shows `refused` three times over, never a false
+            # `read, no result` — see `report/methodology.py`'s
+            # `_accounts_swept_section`.
             if not session_failed:
                 sources.swept_accounts.append(account_id)
 
@@ -1009,9 +1037,22 @@ def _perimeter(sources: _Sources, use_gleif: bool, overlay_file: Path | None = N
     return {
         "state_files": sources.declared,
         "aws": sources.aws,
+        # Whether a `--sources` file's `aws:` block named any accounts to
+        # sweep at all — distinct from `swept_accounts` being empty, which
+        # can also mean a sweep was configured but every account in it was
+        # refused. `methodology.to_markdown` needs both to tell "no channel
+        # beyond Marketplace was ever attempted" apart from "it was attempted
+        # and found nothing".
+        "aws_sweep_configured": sources.aws_sweep is not None,
         "kubernetes": sources.k8s_context or sources.k8s,
         "gleif": use_gleif,
         "overlay": str(overlay_file) if overlay_file else None,
+        "swept_accounts": list(sources.swept_accounts),
+        "clickops_refused": list(sources.clickops_refused),
+        "unnamed_principals": [
+            (principal.account_id, principal.role_name, principal.has_external_id)
+            for principal in sources.unnamed_principals
+        ],
     }
 
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 from dora_roi.models.enums import FieldStatus
 from dora_roi.models.templates import RegisterOfInformation, ThirdPartyProvider
@@ -14,11 +15,30 @@ from dora_roi.report.methodology import to_markdown
 PERIMETER = {
     "state_files": ["s3://b/env:/production/be/terraform.tfstate"],
     "aws": True,
+    "aws_sweep_configured": True,
     "kubernetes": False,
     "gleif": True,
     "overlay": None,
 }
 WHEN = datetime(2026, 3, 31, 9, 0, tzinfo=UTC)
+
+
+def _perimeter(
+    *,
+    swept: list[str] | None = None,
+    refused: list[str] | None = None,
+    unnamed: list[tuple[str, str, bool]] | None = None,
+    **overrides: Any,
+) -> dict[str, Any]:
+    """The perimeter dict in the exact shape `to_markdown` receives from the CLI's
+    own `_perimeter()` in `cli.py` — `swept_accounts`, `clickops_refused` and
+    `unnamed_principals` populated by Task 7's `_collect_aws`."""
+    perimeter = dict(PERIMETER)
+    perimeter["swept_accounts"] = list(swept or [])
+    perimeter["clickops_refused"] = list(refused or [])
+    perimeter["unnamed_principals"] = list(unnamed or [])
+    perimeter.update(overrides)
+    return perimeter
 
 
 def flat(text: str) -> str:
@@ -212,3 +232,121 @@ class TestSystemicCaveats:
             cli_module.collect_organization = original_org
             cli_module.collect_annual_expense = original_ce
         assert "not a legal entity" in (tmp_path / "methodology.md").read_text()
+
+
+class TestTheHonestySurface:
+    """Task 8: a channel that returned nothing and a channel that was refused
+    must never render the same. `ListSAMLProviders` returning zero results and
+    `ListSAMLProviders` denied by IAM are opposite claims about the world that
+    arrive as the identical empty list — the methodology note is the one place
+    that is allowed to tell them apart."""
+
+    def test_an_empty_channel_and_a_refused_channel_do_not_read_the_same(self) -> None:
+        read = to_markdown([], _perimeter(swept=["111122223333"], refused=[]), [])
+        denied = to_markdown(
+            [],
+            _perimeter(swept=["111122223333"], refused=["111122223333 iam-idp: iam:ListSAMLProviders denied"]),
+            [],
+        )
+        assert read != denied
+        assert "no result" in read.lower()
+        assert "refused" in denied.lower()
+        assert "ListSAMLProviders" in denied
+
+    def test_an_unnamed_external_principal_is_stated_not_hidden(self) -> None:
+        note = to_markdown(
+            [],
+            _perimeter(swept=["111122223333"], refused=[], unnamed=[("999988887777", "MysteryRole", True)]),
+            [],
+        )
+        assert "999988887777" in note
+        assert "MysteryRole" in note
+        assert "could not name" in note.lower()
+
+    def test_an_account_that_could_not_be_reached_at_all_is_declared_not_dropped(self) -> None:
+        """I1: session construction can succeed for a profile with dead
+        credentials — the account never lands in `swept_accounts`, but the
+        `no usable credentials` refusal must not vanish either."""
+        body = to_markdown(
+            [],
+            _perimeter(swept=[], refused=["555566667777: no usable credentials (ProfileNotFound: bogus)"]),
+            [],
+        )
+        assert "555566667777" in body
+        assert "no usable credentials" in body
+
+    def test_a_channel_never_swept_for_lack_of_a_sources_file_says_so(self) -> None:
+        """I3: a bare `--aws` scan with no `--sources` file runs Marketplace
+        only. The note must not let a reader conclude the other three
+        channels — identity providers, trust, EventBridge — were swept."""
+        body = to_markdown([], _perimeter(swept=[], refused=[], aws_sweep_configured=False), [])
+        assert "no `--sources`" in body or "not swept" in body.lower()
+        assert "Marketplace" in body
+
+    def test_eventbridge_never_attempted_for_lack_of_a_known_region_says_so(self) -> None:
+        """I2: no state file and no cluster means no region was ever known, so
+        EventBridge could not run for any swept account — that must be
+        declared, not rendered as a silent 'read, no result'."""
+        body = to_markdown(
+            [],
+            _perimeter(
+                swept=["111122223333"],
+                refused=["eventbridge: no regions known (no state file or cluster named one)"],
+            ),
+            [],
+        )
+        assert "no region" in body.lower()
+
+    def test_an_eventbridge_refusal_names_its_region(self) -> None:
+        """A regional refusal must not lose the one detail — which region —
+        that tells an operator which IAM policy to fix."""
+        body = to_markdown(
+            [],
+            _perimeter(
+                swept=["111122223333"],
+                refused=["111122223333/eu-west-1 eventbridge: events:ListEventSources denied (AccessDenied)"],
+            ),
+            [],
+        )
+        assert "eu-west-1" in body
+        assert "ListEventSources" in body
+
+    def test_no_accounts_resolved_to_sweep_is_not_described_as_a_refused_account(self) -> None:
+        """`assume_role_name` with Organizations unreachable resolves to zero
+        accounts — nothing was ever named to sweep, which is an earlier and
+        different failure than a named account being refused, and the note
+        must say which one actually happened."""
+        body = to_markdown(
+            [],
+            _perimeter(
+                swept=[],
+                refused=[
+                    "aws sweep: assume_role_name is set but AWS Organizations was unreachable, so there is no "
+                    "account list to assume it into."
+                ],
+                aws_sweep_configured=True,
+            ),
+            [],
+        )
+        assert "no account list to assume it into" in body
+        assert "refused before a usable session existed" not in body
+
+    def test_a_channel_that_actually_found_something_is_not_reported_as_no_result(self) -> None:
+        """The third outcome: a channel that ran and found a vendor is neither
+        an empty result nor a refusal, and collapsing it into 'read, no
+        result' would hide that this account produced real evidence."""
+        from collections import Counter
+
+        from dora_roi.collectors.tfstate import DiscoveredProvider
+
+        okta = DiscoveredProvider(
+            name="okta",
+            namespace="aws",
+            registry="aws-iam-idp",
+            resource_count=1,
+            resource_types=Counter({"saml_provider": 1}),
+            source_files={"aws:iam:111122223333"},
+        )
+        body = to_markdown([], _perimeter(swept=["111122223333"]), [okta])
+        assert "Identity providers: read" in body
+        assert "Identity providers: read, no result" not in body

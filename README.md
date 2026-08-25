@@ -142,9 +142,17 @@ Read this part before the rest.
 - **It does not make you compliant, and it never will claim to.** It produces
   hypotheses and a gap analysis. That is the whole product.
 - **It does not file anything.** No submission portal, no regulator integration.
-- **It cannot see shadow IT.** Anything outside your IaC and cloud APIs — click-ops
-  resources, a SaaS someone expensed, a contract with no infrastructure footprint — is
-  invisible. Every command prints this, and the reports state exactly what was scanned.
+- **The blind spot does not shrink — only how much of the visible estate this tool can
+  read does.** Four channels now look for vendors with no Terraform footprint at all: AWS
+  Marketplace billing, federated identity providers, cross-account trust relationships,
+  and EventBridge partner event sources — the last three only inside accounts a
+  `--sources` file names to sweep. A vendor that touches none of those four — paid on a
+  personal or company card, no billing line, no IAM trust, no event integration — is
+  exactly as invisible as it always was, and now sits next to vendors the tool *can* see,
+  which makes the gap easier to miss, not smaller. Every command prints exactly what was
+  scanned, and the methodology note states, per channel and per account, whether it was
+  read, read and found nothing, or refused — an empty result and a refusal are opposite
+  claims and this tool never lets them look the same.
 - **It does not classify your services for you.** The S01–S19 code a provider gets is
   your regulatory responsibility. The packaged mapping suggests; you decide.
 - **It does not know your contracts.** Reference numbers, dates, notice periods,
