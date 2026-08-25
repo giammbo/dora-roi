@@ -16,6 +16,14 @@ List, Describe, Get or Search *before it reaches the network*. Writing
 `put_object` here does not fail in review or in production — it fails at the
 call. Objects are copied to a scratch directory and parsed from there.
 
+One declared exception: `_s3_client` calls `sts:AssumeRole` directly when a
+source names a `role_arn`, and that call does not go through `readonly` — it
+is not itself a read. It is defensible on the same grounds
+:mod:`.clickops`'s identical exception documents for its own sweep: assuming
+a role changes nothing in the target account, and every call made *through*
+the session it returns still goes through `readonly` exactly like every
+other credential this tool uses.
+
 Nothing touches the DynamoDB lock table either, so a scan never takes a
 Terraform lock and can never block an apply that is running beside it.
 """

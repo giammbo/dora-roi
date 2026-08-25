@@ -199,6 +199,14 @@ def _already_settled(prefill: Path, names: list[str]) -> dict[str, dict[str, str
     Only FILLED counts. An INFERRED value is a guess, and telling somebody a
     guess is "already confirmed" is how the overlay stops being the place where
     facts are asserted.
+
+    Matched to ``names`` by ``source_key``, never by list position. Both lists
+    come from the same scan, but a vendor-discovery channel can fold a new
+    provider into ``inventory.json``'s ``discovered`` order without touching
+    ``roi_prefill.json``'s ``rows`` order the same way — a positional zip would
+    then hand one provider's confirmed legal name and LEI to a different
+    provider's block, silently and plausibly. `overlay/vendors.py` documents
+    dropping the identical assumption for the same reason.
     """
     if not prefill.is_file():
         return {}
@@ -210,8 +218,12 @@ def _already_settled(prefill: Path, names: list[str]) -> dict[str, dict[str, str
     by_code = {
         info.alias: attribute for attribute, info in ThirdPartyProvider.model_fields.items() if info.alias is not None
     }
+    by_source_key = {row["source_key"]: row for row in rows if isinstance(row, dict) and row.get("source_key")}
     settled: dict[str, dict[str, str]] = {}
-    for name, row in zip(names, rows, strict=False):
+    for name in names:
+        row = by_source_key.get(name)
+        if row is None:
+            continue
         settled[name] = {
             by_code[code]: str(row["values"].get(code))
             for code, entry in (row.get("provenance") or {}).items()
@@ -601,8 +613,18 @@ def _enrich_with_gleif(rows: list[ThirdPartyProvider]) -> None:
             # usually comes from the packaged mapping, which is a guess. So the
             # LEI of an entity we chose is not the same claim as the identity of
             # the counterparty, and only an overlay-asserted name makes it one.
+            #
+            # "Asserted" means the overlay specifically, not merely FILLED: a
+            # FILLED legal_name can now also come from an AWS Marketplace
+            # billing fact (`_apply_vendor_facts`, source "aws:ce") — a real
+            # fact about who invoices you, but not a human's word for which
+            # entity they contracted with, which is the one thing this branch
+            # exists to require. Checking `status_of` alone would let a
+            # billing line pass as an overlay assertion the moment
+            # `_collect_aws` runs before this function.
             exact = match.match_type is MatchType.EXACT
-            asserted = row.status_of("legal_name") is FieldStatus.FILLED
+            legal_name_provenance = row.provenance.get("legal_name")
+            asserted = legal_name_provenance is not None and legal_name_provenance.source == "overlay"
             status = FieldStatus.FILLED if (exact and asserted) else FieldStatus.INFERRED
 
             if not exact:
@@ -612,11 +634,23 @@ def _enrich_with_gleif(rows: list[ThirdPartyProvider]) -> None:
             elif asserted:
                 note = "GLEIF exact match on the legal name asserted in the overlay."
             else:
+                # The name searched came from somewhere other than a human
+                # asserting it in the overlay — the packaged mapping's guess
+                # in the common case, but as of the AWS vendor-discovery
+                # channels it can also be a billing fact (source "aws:ce"):
+                # real, but a statement about who invoices you, not about who
+                # you contracted with. Naming the actual source keeps this
+                # note true in both cases instead of overclaiming "guessed"
+                # for a name AWS itself supplied.
+                origin = (
+                    "a billing fact (AWS knows who it invoices, not who you signed a contract with)"
+                    if legal_name_provenance is not None and legal_name_provenance.source == "aws:ce"
+                    else "the packaged provider mapping, not from your contract"
+                )
                 note = (
-                    f"GLEIF confirms that {match.legal_name!r} holds this LEI. The name itself came "
-                    f"from the packaged provider mapping, not from your contract — so what is "
-                    f"established is the LEI of the entity dora-roi guessed, not that it is your "
-                    f"counterparty. Assert the legal name in the overlay to settle it."
+                    f"GLEIF confirms that {match.legal_name!r} holds this LEI. The name itself came from "
+                    f"{origin} — so what is established is the LEI of the entity dora-roi named, not that "
+                    f"it is your counterparty. Assert the legal name in the overlay to settle it."
                 )
 
             row.identification_code = match.lei
@@ -735,17 +769,14 @@ def _collect_aws(
     try:
         report = collect_annual_expense(profile=profile, payer_accounts=[billed] if billed else None)
     except (AwsError, NameError) as e:
+        # `collect_annual_expense` now wraps botocore's own exceptions into
+        # `AwsError` itself (a missing credential, a denied permission, an
+        # unreachable region), so this catch is narrow on purpose: anything
+        # else is a genuine bug in that function and must surface as one,
+        # not be reported here as "Cost Explorer unavailable" and hidden from
+        # the CLI's own "this is a bug" path.
         err.print(f"[yellow]Warning:[/yellow] AWS Cost Explorer unavailable: {e}")
-        report = None
-    except Exception as e:  # noqa: BLE001 - a missing credential must degrade, not crash the scan
-        # `collect_annual_expense` calls `readonly()` with no guard of its own
-        # (unlike `collect_organization`, which wraps every failure into
-        # `AwsError`), so botocore's own exceptions — no credentials found, an
-        # unreachable region — reach here raw. The constraint this task is
-        # built on is "nothing raises on a missing permission or a bad
-        # credential", and this channel is no exception to it just because its
-        # own module does not wrap its errors yet.
-        err.print(f"[yellow]Warning:[/yellow] AWS Cost Explorer unavailable: {type(e).__name__}: {e}")
+        sources.clickops_refused.append(f"cost explorer: {e}")
         report = None
 
     if report is not None:
@@ -798,8 +829,23 @@ def _collect_aws(
                 "account list to assume it into."
             )
         regions = frozenset(region for provider in discovered for region in provider.regions)
+        if not regions:
+            # EventBridge is regional and this channel only ever sweeps regions
+            # a state file (or Kubernetes) already named — see collect_clickops's
+            # own docstring. On a no-IaC scan that set is empty, so the
+            # EventBridge channel silently never runs for any account in the
+            # sweep. Silence and "checked, found nothing" are opposite claims;
+            # this is the former, and it must say so.
+            sources.clickops_refused.append(
+                "eventbridge: no regions known (no state file or cluster named one), so partner event "
+                "sources were not swept in any account."
+            )
         for sweep_account in accounts:
             account_id = sweep_account.id or sweep_account.role_arn or "unknown account"
+            # `collect_clickops` never raises, so the only way to learn a
+            # session could not even be created for this account is to look
+            # for the specific refusal it appends on that path.
+            before = len(sources.clickops_refused)
             swept, unknown = collect_clickops(
                 profile=sweep_account.profile or sweep.profile,
                 role_arn=sweep_account.role_arn,
@@ -810,7 +856,14 @@ def _collect_aws(
             )
             _fold_in(discovered, rows, mapping, swept)
             sources.unnamed_principals.extend(unknown)
-            sources.swept_accounts.append(account_id)
+            session_failed = any(
+                entry.startswith(f"{account_id}: no usable credentials") for entry in sources.clickops_refused[before:]
+            )
+            # An account whose session never came up was not reached, and
+            # must not read as one that was reached and simply had nothing —
+            # `swept_accounts`'s own docstring states this requirement.
+            if not session_failed:
+                sources.swept_accounts.append(account_id)
 
     _apply_vendor_facts(rows, facts)
     return entities
@@ -874,24 +927,46 @@ def _apply_vendor_facts(rows: list[ThirdPartyProvider], facts: list[VendorFact])
     code than as a review comment. Authoritative facts flow in from outside
     it instead, applied here, after every row already exists.
 
-    The overlay still wins. A billing API knows who invoices you; only a human
-    holding the contract knows which entity was actually signed with, and the
-    two are different companies more often than the bill suggests.
+    The overlay still wins, per field, independently. A billing API knows who
+    invoices you; only a human holding the contract knows which entity was
+    actually signed with, and the two are different companies more often than
+    the bill suggests — legal name always defers to an existing FILLED value.
+    Annual spend is a different claim with its own guard: an overlay that
+    asserts the legal name but never touched the expense (or the reverse)
+    must not have the untouched field silently overwritten just because its
+    sibling was already settled.
     """
     by_key = {fact.key: fact for fact in facts}
     for row in rows:
         fact = by_key.get(row.source_key or "")
         if fact is None:
             continue
-        if row.status_of("legal_name") is FieldStatus.FILLED:
-            continue
-        row.legal_name = fact.legal_name
-        row.mark(
-            "legal_name",
-            FieldStatus.FILLED,
-            source=fact.source,
-            note="seller of record on the AWS Marketplace charges for this account",
-        )
+
+        if row.status_of("legal_name") is not FieldStatus.FILLED:
+            row.legal_name = fact.legal_name
+            row.mark(
+                "legal_name",
+                FieldStatus.FILLED,
+                source=fact.source,
+                note="seller of record on the AWS Marketplace charges for this account",
+            )
+
+        # Grouped by LEGAL_ENTITY_NAME and filtered to the Marketplace billing
+        # entity, this figure is strictly better provenance than the
+        # substring-matched INFERRED estimate `_collect_aws` writes above for
+        # a vendor known only from Terraform — shipping a producer
+        # (`VendorFact.annual_spend`) with no consumer would be worse than not
+        # collecting it at all.
+        if fact.annual_spend is not None and row.status_of("total_annual_expense") is not FieldStatus.FILLED:
+            note = (
+                f"AWS Marketplace charges billed under {fact.legal_name!r}, grouped by LEGAL_ENTITY_NAME "
+                f"and filtered to the Marketplace billing entity."
+            )
+            row.total_annual_expense = fact.annual_spend
+            row.mark("total_annual_expense", FieldStatus.FILLED, source=fact.source, note=note)
+            if fact.currency:
+                row.currency = fact.currency
+                row.mark("currency", FieldStatus.FILLED, source=fact.source, note=note)
 
 
 def _join_supply_chain(roi: RegisterOfInformation) -> None:
@@ -986,9 +1061,20 @@ def _prefill(roi: RegisterOfInformation, perimeter: dict[str, Any]) -> dict[str,
 
 
 def _row_payload(row: RoIRow) -> dict[str, Any]:
-    """Values and provenance, both keyed by official field code."""
+    """Values and provenance, both keyed by official field code, plus the join key.
+
+    ``source_key`` sits alongside ``values``/``provenance``, not inside either
+    of them: it must never be mistaken for a reportable field (it has no
+    alias and no place in a filing), but a reader of ``roi_prefill.json`` —
+    and, structurally, this same module's own ``_already_settled`` — needs a
+    stable way to match a row back to the provider that produced it. Zipping
+    two independently-ordered lists by position is the alternative this
+    exists to rule out: this codebase already learned that lesson once, in
+    :func:`.overlay.vendors.apply_overlay`.
+    """
     code_of = {name: info.alias for name, info in type(row).model_fields.items() if info.alias is not None}
     return {
+        "source_key": row.source_key,
         "values": row.model_dump(by_alias=True, mode="json"),
         "provenance": {
             code_of[name]: {"status": str(entry.status), "source": entry.source, "note": entry.note}

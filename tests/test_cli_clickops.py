@@ -139,8 +139,36 @@ class TestCollectClickops:
         assert providers == []  # no partner sources exist; the point is that nothing raised per-region
 
 
+def test_a_typo_d_profile_costs_the_account_not_the_sweep() -> None:
+    """The real failure C3 was about: no mock of `_session`, no mock of
+    `boto3`. `boto3.Session(profile_name=...)` raises `ProfileNotFound`
+    **eagerly, from the constructor** for a profile that is not in the local
+    AWS config — verified directly above, in the container this suite runs
+    in. A test that instead monkeypatches `_session` to raise `AwsError`
+    proves `collect_clickops` can catch an `AwsError`; it says nothing about
+    whether a mistyped profile ever produces one, which is exactly the gap
+    that let this bug ship. A per-account config typo must cost this one
+    account, never the rest of an N-account sweep."""
+    refused: list[str] = []
+
+    providers, unknown = collect_clickops(
+        profile="definitely-not-a-real-profile-xyz",
+        role_arn=None,
+        account_id="111122223333",
+        own_accounts=frozenset(),
+        regions=frozenset(),
+        refused=refused,
+    )
+
+    assert (providers, unknown) == ([], [])
+    assert refused and "111122223333" in refused[0]
+
+
 def test_a_broken_session_costs_the_account_not_the_sweep(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A profile that cannot be assumed into is refused, and the sweep moves on."""
+    """Complements the real test above: whatever kind of denial `_session`
+    itself raises (`AwsError` or `ClickopsError`), `collect_clickops`'s own
+    contract — catch it, refuse this account, return an empty result — holds
+    regardless of which internal branch of `_session` produced it."""
     import dora_roi.collectors.clickops as clickops_module
 
     def boom(**_: object) -> None:

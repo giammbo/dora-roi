@@ -202,3 +202,43 @@ class TestTaxIsNotAService:
         report = collect_annual_expense(client=client, today=date(2026, 8, 22))
         assert expense_for_provider("aws", report) == Decimal("150.00")
         assert expense_for_provider("datadog", report) == Decimal("50.00")
+
+
+class _BuggyClient:
+    """Stands in for a client whose call raises something no botocore
+    exception hierarchy covers — the shape a real bug in this module's own
+    code would take, not a shape AWS ever sends over the wire."""
+
+    def get_cost_and_usage(self, **kwargs: object) -> dict:
+        raise ValueError("something nobody anticipated")
+
+
+class TestCollectAnnualExpenseDegradesRatherThanCrashes:
+    """`collect_annual_expense` used to call `readonly()` with no guard of its
+    own, so a bare botocore exception (no credentials, a denied permission)
+    reached the caller raw and crashed the whole scan instead of degrading to
+    a warning. Narrowed to botocore's own exception hierarchy so a genuine bug
+    in this function still surfaces as itself."""
+
+    def test_a_bad_profile_raises_awserror_not_a_bare_profilenotfound(self) -> None:
+        """boto3 raises `ProfileNotFound` from the Session constructor, before
+        any network call — real code, no Stubber, the same shape as
+        `collect_marketplace`'s identical test for the identical hazard."""
+        with pytest.raises(AwsError):
+            collect_annual_expense(profile="dora-roi-test-profile-that-does-not-exist")
+
+    def test_a_denied_call_raises_awserror(self, stubbed) -> None:
+        client, stubber = stubbed
+        stubber.add_client_error("get_cost_and_usage", service_error_code="AccessDeniedException")
+        stubber.activate()
+        with pytest.raises(AwsError):
+            collect_annual_expense(client=client)
+
+    def test_a_non_botocore_exception_is_not_disguised_as_cost_explorer_unavailable(self) -> None:
+        """A real bug in this function's own code path — or a client shaped
+        nothing like a botocore one — must surface as itself. Reporting it as
+        `AwsError("Cost Explorer unavailable")` would bypass the CLI's own
+        "this is a bug" path, exactly the failure mode a too-broad catch here
+        would reintroduce."""
+        with pytest.raises(ValueError, match="something nobody anticipated"):
+            collect_annual_expense(client=_BuggyClient())  # type: ignore[arg-type]

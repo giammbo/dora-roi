@@ -784,9 +784,8 @@ def _session(*, profile: str | None, role_arn: str | None) -> Any:
 
     It is not the only place in the codebase that does this: :mod:`.sources`'s
     ``_s3_client`` assumes a role to fetch Terraform state from S3 for the
-    identical reason, and is not declared in that module's own read-only
-    docstring. Worth fixing there too, on the same reasoning as here — flagged
-    rather than silently fixed, since it sits outside this module.
+    identical reason. That module's own docstring now declares it too, on the
+    same reasoning as here.
     """
     try:
         import boto3
@@ -795,7 +794,16 @@ def _session(*, profile: str | None, role_arn: str | None) -> Any:
             "the AWS collector needs the `aws` extra: install with `uv tool install 'dora-roi[aws]'`."
         ) from e
 
-    session = boto3.Session(profile_name=profile)
+    try:
+        # boto3 validates the profile name against the local config eagerly,
+        # from the constructor itself — a typo here (`ProfileNotFound`) never
+        # reaches `readonly()` for anything to catch. This module's own
+        # header names a mistyped profile as a runtime denial, on the same
+        # footing as a throttled call, not a reason for the whole sweep — let
+        # alone the whole scan — to abort.
+        session = boto3.Session(profile_name=profile)
+    except Exception as e:  # noqa: BLE001 - a mistyped profile is a runtime denial, not a crash
+        raise AwsError(f"could not create a session for profile {profile!r}: {e}") from e
     if role_arn is None:
         return session
     try:

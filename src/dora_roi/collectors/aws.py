@@ -291,17 +291,33 @@ def collect_annual_expense(
     Whole months, ending at the start of the current one: a partial month would
     make the register's "annual expense" quietly smaller than a year.
     """
-    client = client if client is not None else _ce_client(profile)
     start, end = annual_window(today)
+    try:
+        from botocore.exceptions import BotoCoreError, ClientError
 
-    response = readonly(
-        client,
-        "get_cost_and_usage",
-        TimePeriod={"Start": start.isoformat(), "End": end.isoformat()},
-        Granularity="MONTHLY",
-        Metrics=[_COST_METRIC],
-        GroupBy=[{"Type": "DIMENSION", "Key": "SERVICE"}],
-    )
+        client = client if client is not None else _ce_client(profile)
+        response = readonly(
+            client,
+            "get_cost_and_usage",
+            TimePeriod={"Start": start.isoformat(), "End": end.isoformat()},
+            Granularity="MONTHLY",
+            Metrics=[_COST_METRIC],
+            GroupBy=[{"Type": "DIMENSION", "Key": "SERVICE"}],
+        )
+    except AwsError:
+        raise
+    except ImportError as e:  # pragma: no cover - depends on install extras
+        raise AwsError(
+            "the AWS collector needs the `aws` extra: install with `uv tool install 'dora-roi[aws]'`."
+        ) from e
+    except (BotoCoreError, ClientError) as e:
+        # Narrowed to botocore's own exception hierarchy on purpose: this is
+        # the one caller-visible boundary between "AWS said no" (missing
+        # credentials, a denied permission, a throttled call — degrade to a
+        # warning) and a genuine bug in this function's own parsing below,
+        # which must still surface as the unexpected error it is rather than
+        # being reported as "Cost Explorer unavailable".
+        raise AwsError(f"Cost Explorer unavailable: {type(e).__name__}: {e}") from e
 
     totals: dict[str, Decimal] = {}
     currency: str | None = None

@@ -161,6 +161,13 @@ Read this part before the rest.
   There are tests for all of it, including one that snapshots every object in a bucket,
   runs a full fetch, and asserts the bucket is byte-identical afterwards.
 
+  Two narrow, declared exceptions: fetching state from S3 with a `role_arn`, and sweeping
+  an account for vendor-discovery evidence with one, both call `sts:AssumeRole` to get
+  there. Neither goes through the guard above, and neither is a read. Both are defensible
+  on the same reasoning: assuming a role changes nothing in the target account, and every
+  call made *through* the session it returns still goes through the guard exactly like
+  every other credential this tool uses.
+
 ## Your DNS zone is a confession
 
 A `required_providers` block lists the APIs your Terraform talks to. Your DNS

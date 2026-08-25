@@ -311,6 +311,47 @@ def test_help_still_works() -> None:
     assert runner.invoke(app, ["--help"]).exit_code == 0
 
 
+def test_already_settled_matches_by_source_key_not_position(tmp_path: Path) -> None:
+    """C1: `inventory.json`'s provider order and `roi_prefill.json`'s row
+    order can diverge — a vendor-discovery channel folding evidence into an
+    existing provider's resource count is enough to re-sort one list and not
+    the other (`_fold_in` re-sorts `discovered`; `rows` keeps its own order).
+    Zipping the two by position, as this function used to, would then hand
+    one vendor's confirmed legal name to a different vendor's block — see
+    `overlay/vendors.py`'s own note about the identical mistake it dropped."""
+    from dora_roi.cli import _already_settled
+
+    prefill = tmp_path / "roi_prefill.json"
+    prefill.write_text(
+        json.dumps(
+            {
+                "templates": {
+                    "B_05.01": [
+                        {
+                            "source_key": "datadog",
+                            "values": {"0050": "Datadog, Inc."},
+                            "provenance": {"0050": {"status": "FILLED", "source": "aws:ce", "note": None}},
+                        },
+                        {
+                            "source_key": "okta",
+                            "values": {"0050": "okta"},
+                            "provenance": {"0050": {"status": "INFERRED", "source": "mapping", "note": None}},
+                        },
+                    ]
+                }
+            }
+        )
+    )
+
+    # inventory.json names datadog second and okta first — the opposite of
+    # roi_prefill.json's row order above, exactly what a Marketplace hit that
+    # merely bumps datadog's resource count would produce.
+    settled = _already_settled(prefill, ["okta", "datadog"])
+
+    assert settled.get("okta", {}) == {}
+    assert settled["datadog"]["legal_name"] == "Datadog, Inc."
+
+
 class TestOverlayCommand:
     def test_init_writes_a_commented_template(self, tmp_path: Path) -> None:
         target = tmp_path / "vendors.yaml"
@@ -552,24 +593,29 @@ class TestAwsWiring:
         assert "warning" in result.output.lower()
         assert (tmp_path / "roi_prefill.json").is_file()
 
-    def test_a_bare_botocore_failure_on_cost_explorer_also_degrades(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    def test_cost_explorer_failure_reaches_the_perimeter_note_not_just_stderr(
+        self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """`collect_annual_expense` has no guard of its own (unlike
-        `collect_organization`, which always raises `AwsError`), so a bare
-        credentials error from botocore reaches this function raw. It must
-        still degrade to a warning, never an unhandled crash."""
+        """`collect_annual_expense` now wraps botocore's own exceptions into
+        `AwsError` itself (see tests/test_aws_cost.py), so `_collect_aws`'s
+        catch stays narrow. The failure must not only print to stderr — it
+        has to reach `clickops_refused` too, or `methodology.md` (Task 8)
+        will say nothing was wrong with a channel that in fact never ran."""
+        from dora_roi.cli import _collect_aws, _Sources
+        from dora_roi.collectors.aws import AwsError
+
         monkeypatch.setattr(cli_module, "collect_organization", lambda **k: self._org())
 
         def boom(**_: object):
-            raise RuntimeError("Unable to locate credentials")
+            raise AwsError("Cost Explorer unavailable: NoCredentialsError: Unable to locate credentials")
 
         monkeypatch.setattr(cli_module, "collect_annual_expense", boom)
-        self._no_marketplace(monkeypatch)
-        result = runner.invoke(app, ["scan", "-s", SAMPLE, "-o", str(tmp_path), "--aws"])
-        assert result.exit_code == 0, result.output
-        assert "cost explorer" in result.output.lower()
-        assert (tmp_path / "roi_prefill.json").is_file()
+        monkeypatch.setattr(cli_module, "collect_marketplace", lambda **k: ([], []))
+
+        sources = _Sources(states=[], aws=True)
+        _collect_aws([], [], {}, sources)
+
+        assert sources.clickops_refused and "cost explorer" in sources.clickops_refused[0].lower()
 
     def test_the_perimeter_records_aws(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(cli_module, "collect_organization", lambda **k: self._org())
@@ -630,6 +676,193 @@ class TestAwsWiring:
         [datadog] = [p for p in prefill["templates"]["B_05.01"] if p["values"]["0050"] == "Datadog, Inc."]
         assert datadog["provenance"]["0050"]["status"] == "FILLED"
         assert datadog["provenance"]["0050"]["source"] == "aws:ce"
+        # I4: the per-seller Marketplace figure is a producer with a consumer —
+        # not just legal_name, the annual spend fact lands too.
+        assert datadog["values"]["0100"] == "4200"
+        assert datadog["provenance"]["0100"]["status"] == "FILLED"
+        assert datadog["provenance"]["0100"]["source"] == "aws:ce"
+        assert datadog["values"]["0090"] == "USD"
+
+    def test_aws_gleif_a_billing_derived_name_is_not_mistaken_for_an_overlay_assertion(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """C2: `_collect_aws` now runs before `_enrich_with_gleif` so a
+        clickops-discovered row gets a chance at an LEI too. Before this
+        test, no test combined --aws and --gleif, and that combination made a
+        billing fact satisfy a branch named `asserted` that was written to
+        mean "a human wrote this in the overlay". No overlay exists here at
+        all: the LEI must stay INFERRED, and the note must not claim an
+        overlay assertion that never happened."""
+        from decimal import Decimal
+
+        from dora_roi.collectors.clickops import VendorFact
+        from dora_roi.collectors.tfstate import DiscoveredProvider
+        from dora_roi.enrichment.gleif import LeiRecord, MatchType
+
+        monkeypatch.setattr(cli_module, "collect_organization", lambda **k: self._org())
+        monkeypatch.setattr(cli_module, "collect_annual_expense", lambda **k: self._expense())
+        monkeypatch.setattr(
+            cli_module,
+            "collect_marketplace",
+            lambda **k: (
+                [DiscoveredProvider(name="datadog", namespace="aws-marketplace", registry="aws-marketplace")],
+                [
+                    VendorFact(
+                        key="datadog",
+                        legal_name="Datadog, Inc.",
+                        annual_spend=Decimal("4200"),
+                        currency="USD",
+                        source="aws:ce",
+                    )
+                ],
+            ),
+        )
+        record = LeiRecord(
+            lei="5493001KJTIIGC8Y1R12",
+            legal_name="Datadog, Inc.",
+            country="US",
+            status="ACTIVE",
+            match_type=MatchType.EXACT,
+        )
+        monkeypatch.setattr(cli_module, "GleifClient", FakeGleif(record))
+
+        result = runner.invoke(app, ["scan", "-o", str(tmp_path), "--aws", "--gleif"])
+        assert result.exit_code == 0, result.output
+        prefill = json.loads((tmp_path / "roi_prefill.json").read_text())
+        [datadog] = [p for p in prefill["templates"]["B_05.01"] if p["values"]["0050"] == "Datadog, Inc."]
+
+        # legal_name itself: still the billing-derived FILLED value, aws:ce —
+        # GLEIF must not have overwritten it with its own spelling, because
+        # that overwrite is gated on the same "overlay-asserted" condition.
+        assert datadog["provenance"]["0050"]["source"] == "aws:ce"
+
+        lei_provenance = datadog["provenance"]["0010"]
+        assert datadog["values"]["0010"] == "5493001KJTIIGC8Y1R12"
+        assert lei_provenance["status"] == "INFERRED"
+        assert "asserted in the overlay" not in lei_provenance["note"]
+        assert "not that it is your counterparty" in lei_provenance["note"]
+
+
+class TestAwsOverlayCombination:
+    """--aws and --overlay together: the combination C1/I4 were found through."""
+
+    def _org(self):
+        from dora_roi.collectors.aws import DiscoveredAccount, OrganizationInventory
+
+        return OrganizationInventory(
+            organization_id="o-abc",
+            master_account_id="123456789012",
+            accounts=[
+                DiscoveredAccount(
+                    account_id="123456789012", name="acme-prod", email=None, status="ACTIVE", ou_path=("Root",)
+                )
+            ],
+        )
+
+    def _expense(self):
+        from datetime import date
+
+        from dora_roi.collectors.aws import ExpenseReport
+
+        return ExpenseReport(currency=None, by_service={}, period=(date(2025, 8, 1), date(2026, 8, 1)))
+
+    def test_the_overlay_wins_over_a_billing_fact_end_to_end(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A no-IaC scan discovers `datadog` purely from Marketplace (C1's
+        fix: the row `_fold_in` created must be the row the overlay's own
+        `_already_settled`/`apply_overlay` logic can find and correct), then
+        the overlay asserts a different legal name for the same vendor. The
+        overlay must win on the field it touches; the aws:ce spend fact
+        (I4) must survive untouched on the field it does not."""
+        from decimal import Decimal
+
+        from dora_roi.collectors.clickops import VendorFact
+        from dora_roi.collectors.tfstate import DiscoveredProvider
+
+        monkeypatch.setattr(cli_module, "collect_organization", lambda **k: self._org())
+        monkeypatch.setattr(cli_module, "collect_annual_expense", lambda **k: self._expense())
+        monkeypatch.setattr(
+            cli_module,
+            "collect_marketplace",
+            lambda **k: (
+                [DiscoveredProvider(name="datadog", namespace="aws-marketplace", registry="aws-marketplace")],
+                [
+                    VendorFact(
+                        key="datadog",
+                        legal_name="Datadog, Inc.",
+                        annual_spend=Decimal("4200"),
+                        currency="USD",
+                        source="aws:ce",
+                    )
+                ],
+            ),
+        )
+        overlay = tmp_path / "vendors.yaml"
+        overlay.write_text("providers:\n  datadog:\n    legal_name: Datadog International BV\n")
+
+        result = runner.invoke(app, ["scan", "-o", str(tmp_path), "--aws", "--overlay", str(overlay)])
+        assert result.exit_code == 0, result.output
+        prefill = json.loads((tmp_path / "roi_prefill.json").read_text())
+        [datadog] = [
+            p
+            for p in prefill["templates"]["B_05.01"]
+            if p["values"].get("0050") in ("Datadog, Inc.", "Datadog International BV")
+        ]
+
+        assert datadog["values"]["0050"] == "Datadog International BV"
+        assert datadog["provenance"]["0050"]["status"] == "FILLED"
+        assert datadog["provenance"]["0050"]["source"] == "overlay"
+
+        # The overlay never mentioned the spend: the aws:ce fact must survive.
+        assert datadog["values"]["0100"] == "4200"
+        assert datadog["provenance"]["0100"]["source"] == "aws:ce"
+
+    def test_overlay_init_seeds_the_marketplace_only_vendor_under_its_own_name(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """C1, end to end through `overlay init`: a vendor discovered purely by
+        Marketplace, with no Terraform footprint, must be seeded under its
+        own name with its own confirmed value — never under a different
+        provider's block just because `_fold_in` folded it in out of the
+        order `inventory.json` happened to list things."""
+        from decimal import Decimal
+
+        from dora_roi.collectors.clickops import VendorFact
+        from dora_roi.collectors.tfstate import DiscoveredProvider
+
+        monkeypatch.setattr(cli_module, "collect_organization", lambda **k: self._org())
+        monkeypatch.setattr(cli_module, "collect_annual_expense", lambda **k: self._expense())
+        monkeypatch.setattr(
+            cli_module,
+            "collect_marketplace",
+            lambda **k: (
+                [DiscoveredProvider(name="datadog", namespace="aws-marketplace", registry="aws-marketplace")],
+                [
+                    VendorFact(
+                        key="datadog",
+                        legal_name="Datadog, Inc.",
+                        annual_spend=Decimal("4200"),
+                        currency="USD",
+                        source="aws:ce",
+                    )
+                ],
+            ),
+        )
+        runner.invoke(app, ["scan", "-o", str(tmp_path), "--aws"])
+
+        target = tmp_path / "vendors.yaml"
+        result = runner.invoke(app, ["overlay", "init", "-o", str(tmp_path), "--to", str(target)])
+        assert result.exit_code == 0, result.output
+        body = target.read_text()
+
+        assert "  datadog:" in body
+        # The already-settled legal name must appear under datadog's own
+        # block, not silently attached to some other provider.
+        lines = body.splitlines()
+        datadog_index = next(i for i, line in enumerate(lines) if line.strip() == "datadog:" or "datadog:" in line)
+        nearby = "\n".join(lines[datadog_index : datadog_index + 6])
+        assert "Datadog, Inc." in nearby
 
 
 class TestAwsSweepWiring:
@@ -786,7 +1019,99 @@ class TestAwsSweepAccounting:
 
         assert sources.swept_accounts == ["444455556666"]
         assert sources.unnamed_principals == [principal]
-        assert sources.clickops_refused == []
+        # I2: no state files means no known regions, so the EventBridge
+        # channel could not run for any account — that must be declared, not
+        # silent, even though the sweep itself otherwise succeeded.
+        assert sources.clickops_refused and "eventbridge" in sources.clickops_refused[0]
+
+    def test_a_refused_account_is_not_recorded_as_swept(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """I1: `swept_accounts`'s own docstring says an account this run never
+        reached must not read as one with nothing in it. A session failure
+        (bad profile, unassumable role) means the account was never reached
+        at all — the opposite of a partial per-channel denial, which still
+        counts as reached."""
+        from datetime import date
+
+        from dora_roi.cli import _collect_aws, _Sources
+        from dora_roi.collectors.aws import DiscoveredAccount, ExpenseReport, OrganizationInventory
+        from dora_roi.collectors.sources import AwsAccount, AwsSweep
+
+        org = OrganizationInventory(
+            organization_id="o-x",
+            master_account_id="111122223333",
+            accounts=[
+                DiscoveredAccount(
+                    account_id="111122223333", name="root", email=None, status="ACTIVE", ou_path=("Root",)
+                )
+            ],
+        )
+        monkeypatch.setattr(cli_module, "collect_organization", lambda **k: org)
+        monkeypatch.setattr(
+            cli_module,
+            "collect_annual_expense",
+            lambda **k: ExpenseReport(currency=None, by_service={}, period=(date(2025, 8, 1), date(2026, 8, 1))),
+        )
+        monkeypatch.setattr(cli_module, "collect_marketplace", lambda **k: ([], []))
+
+        def fake_sweep(*, account_id: str, refused: list[str], **_: object):
+            refused.append(f"{account_id}: no usable credentials (ProfileNotFound: bogus)")
+            return [], []
+
+        monkeypatch.setattr(cli_module, "collect_clickops", fake_sweep)
+
+        sources = _Sources(
+            states=[],
+            aws=True,
+            aws_sweep=AwsSweep(accounts=(AwsAccount(id="444455556666", profile="bogus"),)),
+        )
+
+        _collect_aws([], [], {}, sources)
+
+        assert sources.swept_accounts == []
+        assert any("444455556666: no usable credentials" in entry for entry in sources.clickops_refused)
+
+    def test_a_partial_denial_still_counts_as_swept(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The account was reached — a session was created and at least one
+        channel ran — even though one channel inside it was denied. That is
+        not the same failure `swept_accounts` exists to exclude."""
+        from datetime import date
+
+        from dora_roi.cli import _collect_aws, _Sources
+        from dora_roi.collectors.aws import DiscoveredAccount, ExpenseReport, OrganizationInventory
+        from dora_roi.collectors.sources import AwsAccount, AwsSweep
+
+        org = OrganizationInventory(
+            organization_id="o-x",
+            master_account_id="111122223333",
+            accounts=[
+                DiscoveredAccount(
+                    account_id="111122223333", name="root", email=None, status="ACTIVE", ou_path=("Root",)
+                )
+            ],
+        )
+        monkeypatch.setattr(cli_module, "collect_organization", lambda **k: org)
+        monkeypatch.setattr(
+            cli_module,
+            "collect_annual_expense",
+            lambda **k: ExpenseReport(currency=None, by_service={}, period=(date(2025, 8, 1), date(2026, 8, 1))),
+        )
+        monkeypatch.setattr(cli_module, "collect_marketplace", lambda **k: ([], []))
+
+        def fake_sweep(*, account_id: str, refused: list[str], **_: object):
+            refused.append(f"{account_id} iam-idp: iam:ListSAMLProviders denied (ClientError: AccessDenied)")
+            return [], []
+
+        monkeypatch.setattr(cli_module, "collect_clickops", fake_sweep)
+
+        sources = _Sources(
+            states=[],
+            aws=True,
+            aws_sweep=AwsSweep(accounts=(AwsAccount(id="444455556666", profile="member"),)),
+        )
+
+        _collect_aws([], [], {}, sources)
+
+        assert sources.swept_accounts == ["444455556666"]
 
 
 class TestKubernetesWiring:
