@@ -2,7 +2,24 @@
 
 import pytest
 
-from dora_roi.naming import vendor_key
+from dora_roi.naming import significant_words, vendor_key
+
+
+class TestSignificantWords:
+    """The narrow tokenisation `gleif._shares_a_word` depends on: punctuation
+    beyond `. , - ' '` stays inside a word here, unlike in `vendor_key`."""
+
+    def test_an_ampersand_stays_inside_the_word(self) -> None:
+        """ "AT&T" must stay one token — not "at" and "t", which would let it
+        share a "significant word" with any name that happens to contain a
+        standalone "t"."""
+        assert significant_words("AT&T Corp") == {"at&t"}
+
+    def test_an_internal_period_abbreviation_splits_into_single_letters(self) -> None:
+        """Unlike `vendor_key`, this does not collapse "N.V." into the legal
+        form "nv" — periods are separators here, exactly as they were in
+        GLEIF's tokenisation before the extraction."""
+        assert significant_words("Acme N.V.") == {"acme", "n", "v"}
 
 
 class TestVendorKey:

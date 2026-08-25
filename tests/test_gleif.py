@@ -383,6 +383,21 @@ class TestACandidateMustShareARealWord:
             match = gleif.best_match("Red Hat, Inc.")
         assert match is not None and match.match_type is MatchType.FUZZY
 
+    def test_an_ampersand_does_not_manufacture_a_shared_word(self) -> None:
+        """ "AT&T" must stay one token. Splitting it into "at" and "t" would let
+        it spuriously share "t" with "T-Mobile" — a real regression risk from
+        the naming extraction, since "&" is common in billing/legal names
+        ("A/S", "S.p.A.", "AT&T") and the tool's users match these all day."""
+        payload = {"data": [lei_record_payload(lei="5493001AHR8KMMFIS520", name="T-Mobile US, Inc.", country="US")]}
+        rec = Recorder(
+            {
+                "/api/v1/lei-records": httpx.Response(200, json=payload),
+                "/api/v1/fuzzycompletions": httpx.Response(200, json={"data": []}),
+            }
+        )
+        with client(rec) as gleif:
+            assert gleif.best_match("AT&T Corp") is None
+
     def test_the_right_one_wins_over_a_merely_plausible_one(self) -> None:
         payload = {
             "data": [
