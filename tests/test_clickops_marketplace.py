@@ -13,16 +13,22 @@ from dora_roi.collectors.aws import AwsError
 from dora_roi.collectors.clickops import ClickopsError, VendorFact, collect_marketplace
 
 
-def _ce_response(rows: list[tuple[str, str]], unit: str = "USD") -> dict:
+def _ce_response(rows: list[tuple[str, str] | tuple[str, str, str]]) -> dict:
+    """Build one `ResultsByTime` page. Each row is `(name, amount)` — defaulting
+    to USD — or `(name, amount, unit)` when a test needs a specific or a
+    differing currency."""
+
+    def _group(row: tuple[str, str] | tuple[str, str, str]) -> dict:
+        name, amount, *rest = row
+        unit = rest[0] if rest else "USD"
+        return {"Keys": [name], "Metrics": {"UnblendedCost": {"Amount": amount, "Unit": unit}}}
+
     return {
         "ResultsByTime": [
             {
                 "TimePeriod": {"Start": "2025-08-01", "End": "2026-08-01"},
                 "Total": {},
-                "Groups": [
-                    {"Keys": [name], "Metrics": {"UnblendedCost": {"Amount": amount, "Unit": unit}}}
-                    for name, amount in rows
-                ],
+                "Groups": [_group(row) for row in rows],
                 "Estimated": False,
             }
         ]
@@ -145,6 +151,91 @@ class TestMarketplaceSellers:
 
         providers, facts = collect_marketplace(client=client, refused=[], today=date(2026, 8, 22))
         assert (providers, facts) == ([], [])
+
+    @pytest.mark.parametrize("aws_name", ["Amazon Web Services, Inc.", "AMAZON WEB SERVICES EMEA SARL"])
+    def test_aws_named_as_its_own_seller_is_not_a_phantom_vendor(self, stubbed, aws_name: str) -> None:
+        """Unverified against a real bill (see the constant's docstring) — but if it
+        ever happens, it must not duplicate the `aws` row under a second key."""
+        client, stubber = stubbed
+        stubber.add_response("get_cost_and_usage", _ce_response([(aws_name, "5.00")]))
+        stubber.activate()
+
+        providers, facts = collect_marketplace(client=client, refused=[], today=date(2026, 8, 22))
+        assert (providers, facts) == ([], [])
+
+    def test_two_sellers_keep_their_own_currency(self, stubbed) -> None:
+        """Regression lock for the per-seller currency fix: with a single global
+        `currency` variable this would label one seller with the other's unit."""
+        client, stubber = stubbed
+        stubber.add_response(
+            "get_cost_and_usage",
+            _ce_response([("Datadog, Inc.", "10.00", "USD"), ("Snyk Limited", "20.00", "EUR")]),
+        )
+        stubber.activate()
+
+        _, facts = collect_marketplace(client=client, refused=[], today=date(2026, 8, 22))
+
+        by_key = {f.key: f.currency for f in facts}
+        assert by_key == {"datadog": "USD", "snyk": "EUR"}
+
+    def test_one_sellers_own_lines_mixing_currency_is_refused_not_summed(self, stubbed) -> None:
+        """collect_annual_expense treats this as fatal for the same reason: adding
+        the two would invent an exchange rate, and this is the authoritative
+        channel — it must not be laxer about it than the inferred one."""
+        client, stubber = stubbed
+        payload = _ce_response([("Datadog, Inc.", "10.00", "USD")])
+        payload["ResultsByTime"].append(_ce_response([("Datadog, Inc.", "5.00", "EUR")])["ResultsByTime"][0])
+        stubber.add_response("get_cost_and_usage", payload)
+        stubber.activate()
+
+        refused: list[str] = []
+        providers, facts = collect_marketplace(client=client, refused=refused, today=date(2026, 8, 22))
+
+        assert (providers, facts) == ([], [])
+        assert refused and "currenc" in refused[0].lower()
+
+    def test_a_truncated_page_is_followed_not_dropped(self, stubbed) -> None:
+        """A real seller sitting on page 2 must not vanish as though it never
+        billed anything — that is indistinguishable from it not existing."""
+        client, stubber = stubbed
+        page1 = _ce_response([("Datadog, Inc.", "10.00")])
+        page1["NextPageToken"] = "page-2"
+        page2 = _ce_response([("Snyk Limited", "5.00")])
+        stubber.add_response("get_cost_and_usage", page1)
+        stubber.add_response(
+            "get_cost_and_usage",
+            page2,
+            {
+                "TimePeriod": {"Start": "2025-08-01", "End": "2026-08-01"},
+                "Granularity": "MONTHLY",
+                "Metrics": ["UnblendedCost"],
+                "Filter": {"Dimensions": {"Key": "BILLING_ENTITY", "Values": ["AWS Marketplace"]}},
+                "GroupBy": [{"Type": "DIMENSION", "Key": "LEGAL_ENTITY_NAME"}],
+                "NextPageToken": "page-2",
+            },
+        )
+        stubber.activate()
+
+        providers, facts = collect_marketplace(client=client, refused=[], today=date(2026, 8, 22))
+
+        assert sorted(p.name for p in providers) == ["datadog", "snyk"]
+        assert {f.key for f in facts} == {"datadog", "snyk"}
+        stubber.assert_no_pending_responses()
+
+    def test_a_bad_profile_degrades_the_channel_instead_of_killing_the_scan(self) -> None:
+        """Client construction must sit inside the same no-raise guard as the AWS
+        call: a typo in sources.yaml's `aws:` profile is not a reason to hand
+        back no register at all. No Stubber here on purpose — boto3 raises
+        ProfileNotFound locally, before any network call is attempted, so this
+        exercises the real `_ce_client` path without touching the network."""
+        refused: list[str] = []
+        providers, facts = collect_marketplace(
+            profile="dora-roi-test-profile-that-does-not-exist", refused=refused, today=date(2026, 8, 22)
+        )
+
+        assert (providers, facts) == ([], [])
+        assert refused
+        assert "marketplace" in refused[0].lower()
 
 
 class TestVendorFact:

@@ -15,16 +15,22 @@ never upgrades a hypothesis into a fact. A trusted account this tool cannot
 name does not become a vendor with an invented name; it becomes a declared
 unknown, which is worth more to an auditor than a guess dressed up as data.
 
-Two exceptions, two different failure modes:
+Two exceptions name two different failure modes, though both end up in the
+same place:
 
-* :class:`ClickopsError` is a configuration mistake — the ``aws`` extra is not
-  installed, a channel was pointed at something it cannot parse. It is ours to
-  fix, so it raises.
-* Everything else AWS can say no to — a missing IAM permission, a throttled
-  call, an unreachable region — is a runtime denial. Nothing here raises for
-  one of those: it is appended to the caller's ``refused`` list and the scan
-  carries on, because an empty channel and a refused channel are opposite
-  claims about the world and only one of them is ours to make.
+* :class:`ClickopsError` names a configuration mistake — the ``aws`` extra is
+  not installed, a channel is pointed at something it cannot parse — distinctly
+  from a runtime denial, so a human reading ``refused`` can tell "fix your
+  setup" apart from "AWS said no".
+* Everything else AWS (or ``boto3``) can say no to — a missing IAM permission,
+  a mistyped profile, a throttled call, an unreachable region — is a runtime
+  denial.
+
+Neither one is allowed to raise out of a collector function in this module:
+both are appended to the caller's ``refused`` list and the scan carries on,
+because an empty channel and a refused channel are opposite claims about the
+world and only one of them is ours to make. A missing ``aws`` extra should not
+cost the whole scan any more than a missing IAM permission does.
 """
 
 from __future__ import annotations
@@ -51,6 +57,24 @@ __all__ = ["ClickopsError", "VendorFact", "collect_marketplace"]
 #: charge it cannot attribute to a legal entity — that placeholder is not a
 #: seller and must never be reported as one.
 _MARKETPLACE = "AWS Marketplace"
+
+#: AWS's own legal names, in case `LEGAL_ENTITY_NAME` ever names AWS itself as
+#: the seller of record on a Marketplace-billed line (an AWS-native offering
+#: sold through the Marketplace listing mechanism, for instance). Skipped for
+#: the same reason as `_MARKETPLACE`: reporting AWS as a Marketplace vendor
+#: would create a second, phantom "aws" row next to the one the tfstate
+#: channel already produces under that exact key.
+#:
+#: NOT VERIFIED against a real Cost Explorer response — nobody on this project
+#: has seen `LEGAL_ENTITY_NAME` actually return one of these on a Marketplace
+#: line, so this list may turn out to be unneeded, wrong, or incomplete. Kept
+#: as an explicit, narrow list rather than a broad heuristic (e.g. matching
+#: `/amazon/i`) on purpose: a heuristic would also swallow a legitimately
+#: named seller such as "Amazon Analytics Ltd", which is worse than the
+#: phantom row it would prevent. A field test against a real payer account
+#: must settle whether this list belongs here at all.
+_AWS_SELLING_ENTITIES = frozenset({"amazon web services, inc.", "amazon web services emea sarl"})
+
 _METRIC = "UnblendedCost"
 
 
@@ -86,25 +110,31 @@ def collect_marketplace(
     ``client`` and ``today`` exist so tests inject a stubbed Cost Explorer
     client and a fixed clock, the same convention :func:`.aws.collect_annual_expense`
     uses — nothing here monkeypatches a private constructor.
-    """
-    client = client if client is not None else _ce_client(profile)
-    start, end = annual_window(today)
 
+    Client construction happens inside the same guard as the AWS call itself:
+    a mistyped profile in the ``aws:`` block of the sources config raises
+    ``ProfileNotFound`` from ``boto3`` before any request is even attempted,
+    and that is a typo, not a reason to hand back no register at all.
+    """
     try:
-        response = readonly(
+        client = client if client is not None else _ce_client(profile)
+        start, end = annual_window(today)
+        results = _all_results(
             client,
-            "get_cost_and_usage",
             TimePeriod={"Start": start.isoformat(), "End": end.isoformat()},
             Granularity="MONTHLY",
             Metrics=[_METRIC],
             Filter={"Dimensions": {"Key": "BILLING_ENTITY", "Values": [_MARKETPLACE]}},
             GroupBy=[{"Type": "DIMENSION", "Key": "LEGAL_ENTITY_NAME"}],
         )
-        totals, currencies = _totals_by_seller(response)
+        totals, currencies = _totals_by_seller(results)
+    except ClickopsError as e:
+        refused.append(f"marketplace: {e}")
+        return [], []
     except AwsError as e:
         refused.append(f"marketplace: {e}")
         return [], []
-    except Exception as e:  # noqa: BLE001 - any other AWS failure degrades this channel too
+    except Exception as e:  # noqa: BLE001 - any other AWS/client failure degrades this channel too
         refused.append(f"marketplace: ce:GetCostAndUsage unavailable ({type(e).__name__}: {e})")
         return [], []
 
@@ -134,27 +164,61 @@ def collect_marketplace(
     return providers, facts
 
 
-def _totals_by_seller(response: dict[str, Any]) -> tuple[dict[str, Decimal], dict[str, str]]:
-    """Sum each seller's monthly lines. Currency is tracked per seller, not
-    globally: two Marketplace sellers billing in different currencies must
-    never be added together under one label, the way a single global currency
-    variable would risk doing.
+def _all_results(client: CostExplorerClient, **kwargs: Any) -> list[dict[str, Any]]:
+    """Every page of ``get_cost_and_usage``, concatenated.
+
+    Cost Explorer paginates a single grouped request over ``NextPageToken``
+    once the result set is large enough. A silently truncated page makes a
+    real seller vanish exactly the way a nonexistent one would — indistin-
+    guishable from the outside, which is the one failure this channel exists
+    to rule out, since it is the only channel that ever gets to say FILLED.
+    """
+    results: list[dict[str, Any]] = []
+    token: str | None = None
+    while True:
+        page = readonly(client, "get_cost_and_usage", **kwargs, **({"NextPageToken": token} if token else {}))
+        results.extend(page.get("ResultsByTime", []))
+        token = page.get("NextPageToken")
+        if not token:
+            return results
+
+
+def _totals_by_seller(results: list[dict[str, Any]]) -> tuple[dict[str, Decimal], dict[str, str]]:
+    """Sum each seller's monthly lines.
+
+    Currency is tracked per seller, not globally: two Marketplace sellers
+    billing in different currencies must never be added together under one
+    shared label. A single seller whose own lines mix currencies mid-window is
+    worse, not better — that is a real amount that cannot be summed without
+    inventing an exchange rate, so it raises exactly as
+    :func:`.aws.collect_annual_expense` does for the identical reason, rather
+    than silently keeping whichever currency happened to arrive first.
     """
     totals: dict[str, Decimal] = {}
     currencies: dict[str, str] = {}
-    for window in response.get("ResultsByTime", []):
+    for window in results:
         for group in window.get("Groups", []):
             keys = group.get("Keys") or []
             legal_name = keys[0] if keys else ""
-            if not legal_name or legal_name == _MARKETPLACE:
-                # No legal entity attributed, or the billing-entity placeholder
-                # itself: neither is a seller, and reporting one as a vendor
-                # would invent a legal name nobody billed under.
+            if not legal_name or legal_name == _MARKETPLACE or legal_name.casefold() in _AWS_SELLING_ENTITIES:
+                # No legal entity attributed, the billing-entity placeholder
+                # itself, or (unverified — see the constant's docstring) AWS
+                # named as its own Marketplace seller: none of these is a
+                # third party, and reporting one would invent a legal name
+                # nobody billed under, or duplicate the `aws` row under a
+                # second, different key.
                 continue
             metric = group.get("Metrics", {}).get(_METRIC, {})
             unit = metric.get("Unit")
             if unit:
-                currencies.setdefault(legal_name, unit)
+                previous = currencies.get(legal_name)
+                if previous is not None and unit != previous:
+                    raise AwsError(
+                        f"Cost Explorer returned more than one currency for {legal_name!r} "
+                        f"({previous} and {unit}). Adding them together would invent an exchange "
+                        f"rate; re-run scoped to a single billing currency."
+                    )
+                currencies[legal_name] = unit
             totals[legal_name] = totals.get(legal_name, Decimal(0)) + _amount(metric.get("Amount"))
     return totals, currencies
 
