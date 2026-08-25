@@ -124,3 +124,30 @@ class TestDeniedPermissions:
 
         assert "111122223333" in refused[0]
         assert "ap-southeast-1" in refused[0]
+
+
+class _PaginatedBus:
+    """Two pages of `list_event_sources`, chained by EventBridge's own
+    `NextToken` — the API paginates for real, unlike `_Bus`'s single-call
+    fixtures above, so `_all_event_sources` must walk to the end of it before
+    this channel decides the bus has only whatever page one carried."""
+
+    def list_event_sources(self, **kwargs: object) -> dict:
+        if kwargs.get("NextToken") is None:
+            return {
+                "EventSources": [{"Name": "aws.partner/datadoghq.com/111122223333/events"}],
+                "NextToken": "page-2",
+            }
+        assert kwargs["NextToken"] == "page-2"
+        return {"EventSources": [{"Name": "aws.partner/segment.com/111122223333/events"}]}
+
+
+class TestPagination:
+    def test_a_second_page_of_event_sources_is_not_dropped(self) -> None:
+        """A partner integration sitting on page two must not vanish as
+        though the bus only ever had the one on page one."""
+        found = collect_partner_event_sources(
+            _PaginatedBus(), account_id="111122223333", region="eu-west-1", refused=[]
+        )
+
+        assert [p.name for p in found] == ["datadog", "segment"]

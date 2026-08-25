@@ -13,6 +13,7 @@ is the only way to exercise the parse-failure path at all.
 from __future__ import annotations
 
 import json
+import re
 
 import boto3
 from moto import mock_aws
@@ -257,6 +258,62 @@ def test_edge_shaped_principals_are_handled_without_crashing() -> None:
     assert bare.role_name == "BareAccountRole"
     odd_condition = next(u for u in unknown if u.account_id == "888877776666")
     assert odd_condition.has_external_id is False
+
+
+class _PaginatedRoles:
+    """Two pages of `list_roles`, chained by IAM's real `Marker`/`IsTruncated`
+    pair — no moto involved, since reaching a second page for real would mean
+    creating over a hundred roles just to exercise a loop. `_all_roles` must
+    walk to the end of this before `collect_trust_relationships` decides the
+    account has nothing more to say: a vendor role or an unnamed external
+    principal sitting on page two must not vanish as though page one were
+    the whole answer.
+    """
+
+    def list_roles(self, **kwargs: object) -> dict:
+        if kwargs.get("Marker") is None:
+            return {
+                "Roles": [
+                    {
+                        "RoleName": "PageOneRole",
+                        "AssumeRolePolicyDocument": _trust("arn:aws:iam::464622532012:root"),
+                    }
+                ],
+                "IsTruncated": True,
+                "Marker": "page-2",
+            }
+        assert kwargs["Marker"] == "page-2"
+        return {
+            "Roles": [
+                {
+                    "RoleName": "PageTwoRole",
+                    "AssumeRolePolicyDocument": _trust("arn:aws:iam::999988887777:root"),
+                }
+            ],
+            "IsTruncated": False,
+        }
+
+
+def test_a_second_page_of_roles_is_not_dropped() -> None:
+    """A Datadog role on page one and an unnamed account on page two must both
+    survive — this channel's own finding is exactly what page two would carry
+    away silently if pagination stopped after the first call."""
+    providers, unknown = collect_trust_relationships(
+        _PaginatedRoles(), account_id="111122223333", own_accounts=OWN, refused=[]
+    )
+
+    assert [p.name for p in providers] == ["datadog"]
+    assert [u.account_id for u in unknown] == ["999988887777"]
+
+
+def test_every_vendor_account_id_is_a_bare_12_digit_string() -> None:
+    """A typo'd 11- or 13-digit key never matches anything. Worse, an
+    unquoted key whose digits are all 0-7 and starts with a 0 parses as an
+    octal integer and `str()`s into a different number entirely — this is the
+    only check that would catch either mistake before it ships."""
+    from dora_roi.collectors.clickops import _vendor_accounts
+
+    assert all(re.fullmatch(r"\d{12}", k) for k in _vendor_accounts())
 
 
 def test_every_vendor_account_maps_to_a_known_provider() -> None:

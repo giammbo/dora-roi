@@ -382,6 +382,28 @@ def _record(into: dict[str, DiscoveredProvider], blob: str, evidence: str, accou
 _PARTNER_SOURCE_PREFIX = "aws.partner/"
 
 
+def _all_event_sources(client: Any) -> list[dict[str, Any]]:
+    """Every EventBridge event source, walked to the end of ``list_event_sources``'s pagination.
+
+    This API paginates with ``NextToken``, request and response alike — the
+    shape :func:`_all_results` already reads for Cost Explorer under a
+    differently-named field (``NextPageToken``), and a different shape again
+    from IAM's ``Marker``/``IsTruncated`` pair that :func:`_all_roles` reads.
+    Three APIs, three field names for "there is more": stopping at the first
+    page here would make a partner integration vanish exactly because it
+    happened to sit on page two, indistinguishable from one that was never
+    wired in at all.
+    """
+    sources: list[dict[str, Any]] = []
+    token: str | None = None
+    while True:
+        page = readonly(client, "list_event_sources", **({"NextToken": token} if token else {}))
+        sources.extend(page.get("EventSources", []))
+        token = page.get("NextToken")
+        if not token:
+            return sources
+
+
 def collect_partner_event_sources(
     client: Any, *, account_id: str, region: str, refused: list[str]
 ) -> list[DiscoveredProvider]:
@@ -404,15 +426,20 @@ def collect_partner_event_sources(
     Takes a client, not a profile or a session: the caller constructs one
     ``events`` client per region and passes it straight in, the same
     convention every other channel in this module uses.
+
+    Walks ``list_event_sources`` to the end of its own pagination (see
+    :func:`_all_event_sources`) before deciding this bus has no partner
+    sources at all: an account with enough integrations to fill a page must
+    not lose whatever sits on the next one.
     """
     try:
-        response = readonly(client, "list_event_sources")
+        sources = _all_event_sources(client)
     except Exception as e:  # noqa: BLE001 - a denial is a perimeter fact, not a crash
         refused.append(f"{account_id}/{region} eventbridge: events:ListEventSources denied ({type(e).__name__}: {e})")
         return []
 
     found: dict[str, DiscoveredProvider] = {}
-    for source in response.get("EventSources", []):
+    for source in sources:
         vendor = _partner_source_vendor(source.get("Name", ""))
         if vendor is None:
             continue
@@ -587,6 +614,33 @@ def _has_external_id(statement: dict[str, Any]) -> bool:
     return bool(string_equals.get("sts:ExternalId"))
 
 
+def _all_roles(client: Any) -> list[dict[str, Any]]:
+    """Every IAM role, walked to the end of ``list_roles``'s pagination.
+
+    IAM signals more pages with ``IsTruncated`` plus a ``Marker`` to send back
+    on the next call — not the ``NextToken`` shape :func:`_all_results` reads
+    for Cost Explorer, or :func:`_all_event_sources` reads for EventBridge,
+    and not :func:`.aws._pages`'s shape either, which is typed to the
+    Organizations client specifically. IAM's default page size is 100 roles,
+    routinely fewer than a real production account holds. Stopping at the
+    first page would make this channel's own finding depend on where in
+    ``ListRoles``'s ordering a role happened to land: a vendor role on page
+    two would produce no provider row, an unnamed external principal on page
+    two would produce no declared unknown, and the methodology note that
+    reads ``refused`` would call the scan clean — a false negative dressed up
+    as a complete one, which is exactly the failure this channel exists to
+    rule out.
+    """
+    roles: list[dict[str, Any]] = []
+    marker: str | None = None
+    while True:
+        page = readonly(client, "list_roles", **({"Marker": marker} if marker else {}))
+        roles.extend(page.get("Roles", []))
+        marker = page.get("Marker")
+        if not page.get("IsTruncated") or not marker:
+            return roles
+
+
 def collect_trust_relationships(
     client: Any, *, account_id: str, own_accounts: frozenset[str], refused: list[str]
 ) -> tuple[list[DiscoveredProvider], list[ExternalPrincipal]]:
@@ -610,15 +664,17 @@ def collect_trust_relationships(
 
     Needs only ``iam:ListRoles``: unlike :func:`collect_identity_providers`,
     which pairs a ``List*`` and a ``Get*`` call per provider, ``list_roles``
-    already returns each role's ``AssumeRolePolicyDocument`` inline. One
-    denied listing costs the whole channel — there is no narrower call to fall
-    back to — and is appended to ``refused`` rather than raised. Past that,
-    one role with a trust policy this module cannot parse skips that role
-    alone: a single weird policy from years ago is never the reason the rest
-    of the account's trust relationships go unreported.
+    already returns each role's ``AssumeRolePolicyDocument`` inline. Walked to
+    the end of its own pagination before this function decides the account
+    has nothing more to say (see :func:`_all_roles`) — a denial on any page
+    costs the whole channel, since there is no narrower call to fall back to,
+    and is appended to ``refused`` rather than raised. Past that, one role
+    with a trust policy this module cannot parse skips that role alone: a
+    single weird policy from years ago is never the reason the rest of the
+    account's trust relationships go unreported.
     """
     try:
-        response = readonly(client, "list_roles")
+        roles = _all_roles(client)
     except Exception as e:  # noqa: BLE001 - a denial is a perimeter fact, not a crash
         refused.append(f"{account_id} trust: iam:ListRoles denied ({type(e).__name__}: {e})")
         return [], []
@@ -627,7 +683,7 @@ def collect_trust_relationships(
     found: dict[str, DiscoveredProvider] = {}
     unknown: list[ExternalPrincipal] = []
 
-    for role in response.get("Roles", []):
+    for role in roles:
         name = role.get("RoleName", "")
         policy = _trust_policy(role.get("AssumeRolePolicyDocument"))
         if policy is None:
