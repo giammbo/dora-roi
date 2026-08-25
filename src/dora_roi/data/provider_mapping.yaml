@@ -388,3 +388,21 @@ shopify:
   notes: >-
     E-commerce platform; found here only through its EventBridge partner event
     source, since it carries no Terraform provider of its own.
+
+# --- Reached through a cross-account IAM trust policy, not a Terraform
+# provider, a DNS record, or an EventBridge source ---------------------------
+# An outside AWS account allowed to assume a role in yours names itself by a
+# bare account ID, not a hostname or a provider block. The key is what
+# `collect_trust_relationships` (`collectors/clickops.py`) resolves the
+# account ID to, via `data/aws_vendor_accounts.yaml` — a table that is
+# incomplete by construction, see that file's own header.
+
+snyk:
+  vendor: Snyk Limited
+  hq_country: GB
+  services: [S19, S04]
+  notes: >-
+    Found here only through its AWS cross-account trust-policy integration
+    (Snyk Cloud); Snyk Limited is UK-incorporated per Companies House, but a US
+    or reseller contract may run through a different Snyk entity — verify
+    against your own contract.

@@ -5,15 +5,16 @@ different question — "who else is in here" — and the two disagree more often
 than anyone expects: on the estate this tool was first proved against, nine of
 the ten vendors found appeared in no ``required_providers`` block at all.
 
-Four channels are planned here, and only one of them is authoritative. AWS
+Four channels live here, and only one of them is authoritative. AWS
 Marketplace charges carry the seller's legal name from a billing API, which is
 a fact — the same class of source as the expense figure in :mod:`.aws`.
 Identity providers, EventBridge partner sources and cross-account trust
-policies (later channels in this module) carry a hostname or an account
-number, which is a hypothesis about who you contracted with — and this module
-never upgrades a hypothesis into a fact. A trusted account this tool cannot
-name does not become a vendor with an invented name; it becomes a declared
-unknown, which is worth more to an auditor than a guess dressed up as data.
+policies (the other three channels in this module) carry a hostname or an
+account number, which is a hypothesis about who you contracted with — and this
+module never upgrades a hypothesis into a fact. A trusted account this tool
+cannot name does not become a vendor with an invented name; it becomes a
+declared unknown, which is worth more to an auditor than a guess dressed up as
+data.
 
 Two exceptions name two different failure modes, though both end up in the
 same place:
@@ -35,12 +36,17 @@ cost the whole scan any more than a missing IAM permission does.
 
 from __future__ import annotations
 
+import json
 import re
 from collections import Counter
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal, InvalidOperation
+from importlib import resources
 from typing import TYPE_CHECKING, Any
+from urllib.parse import unquote
+
+import yaml
 
 from dora_roi.collectors.aws import AwsError, annual_window, readonly
 from dora_roi.collectors.domains import vendor_for_host
@@ -54,10 +60,12 @@ else:
 
 __all__ = [
     "ClickopsError",
+    "ExternalPrincipal",
     "VendorFact",
     "collect_identity_providers",
     "collect_marketplace",
     "collect_partner_event_sources",
+    "collect_trust_relationships",
 ]
 
 #: Cost Explorer's name for the billing entity that groups every Marketplace
@@ -440,3 +448,219 @@ def _partner_source_vendor(name: str) -> str | None:
         return None
     host = name[len(_PARTNER_SOURCE_PREFIX) :].split("/", 1)[0]
     return vendor_for_host(host)
+
+
+#: The packaged account-ID -> vendor-key table's filename, next to
+#: ``provider_mapping.yaml`` inside the ``dora_roi.data`` package.
+_VENDOR_ACCOUNTS_FILE = "aws_vendor_accounts.yaml"
+
+#: A 12-digit account inside an IAM principal ARN, e.g. the account in
+#: ``arn:aws:iam::464622532012:root`` or ``...:role/SomeRole``. IAM accepts
+#: several ARN partitions (``aws``, ``aws-cn``, ``aws-us-gov``) ahead of the
+#: same ``:iam::<account>:`` shape, hence the partition class rather than a
+#: literal ``aws``.
+_ACCOUNT_ARN = re.compile(r"^arn:aws[a-z-]*:iam::(\d{12}):")
+
+#: The other shape IAM accepts as a trust policy principal: a bare account
+#: number with no ARN wrapper at all (``"Principal": {"AWS": "464622532012"}``).
+_BARE_ACCOUNT = re.compile(r"^\d{12}$")
+
+
+@dataclass(frozen=True)
+class ExternalPrincipal:
+    """An outside AWS account trusted to assume a role here, that no table can name.
+
+    Not a failure of this channel — the finding it exists to produce. Golden
+    rule 1 forbids turning a hypothesis into a fact; naming a company from an
+    account number nobody vouched for would do exactly that, so an account
+    absent from :func:`_vendor_accounts` lands here instead of in
+    :class:`.tfstate.DiscoveredProvider`. Later tasks read this list to put
+    "an external account has standing access and we cannot say whose" in the
+    methodology note and raise it as a finding — a true, actionable statement
+    that a guessed vendor name never could have been.
+    """
+
+    account_id: str
+    role_name: str
+    has_external_id: bool
+
+
+def _vendor_accounts() -> dict[str, str]:
+    """The packaged account-ID -> vendor-key table.
+
+    Deliberately incomplete — see the file's own header for why, and for what
+    it takes to add a row. Every value here must be a key
+    :func:`.mapping.load_mapping` recognises; :data:`_VENDOR_ACCOUNTS_FILE`'s
+    own test enforces that, the same way the domain table's coverage is
+    enforced for the DNS-based channels.
+    """
+    raw = resources.files("dora_roi.data").joinpath(_VENDOR_ACCOUNTS_FILE).read_text(encoding="utf-8")
+    return {str(k): str(v) for k, v in (yaml.safe_load(raw) or {}).items()}
+
+
+def _trust_policy(document: Any) -> dict[str, Any] | None:
+    """Parse one role's ``AssumeRolePolicyDocument``, or say it could not be read.
+
+    Verified against a real ``boto3`` IAM client (moto included — it goes
+    through the same botocore response parsing a live call would): botocore
+    auto-decodes this field into an already-parsed ``dict`` before this
+    module ever sees it, via its own IAM policy-document handler. A plain
+    JSON string only arrives here from something that bypassed that handler —
+    this module's own hand-written test doubles standing in for a malformed
+    response, or a client wired up in a way this codebase has not exercised —
+    so both shapes are accepted rather than one being assumed. Anything that
+    is neither a ``dict`` nor ``unquote``-and-``json.loads``-able, including a
+    string that survives the decode step but is not valid JSON, returns
+    ``None``, which the caller turns into a refusal for that one role, never
+    for the scan.
+    """
+    if isinstance(document, dict):
+        return document
+    try:
+        parsed = json.loads(unquote(document or "{}"))
+    except (TypeError, ValueError):
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _statements(policy: dict[str, Any]) -> list[dict[str, Any]]:
+    """Every ``Allow`` statement in a trust policy; ``Deny`` is excluded.
+
+    A ``Deny`` statement names a principal it locks out, not one it trusts.
+    Crediting a vendor, or flagging an unknown, from a statement that exists
+    to refuse someone would report the opposite of what the policy says.
+    """
+    raw = policy.get("Statement", [])
+    statements = raw if isinstance(raw, list) else [raw]
+    return [s for s in statements if isinstance(s, dict) and s.get("Effect") == "Allow"]
+
+
+def _principal_accounts(principal: Any) -> list[str]:
+    """Every distinct AWS account named by one statement's ``Principal.AWS``.
+
+    That value arrives as a single string for one trusted principal or a list
+    for several; either way, only entries that actually resolve to a 12-digit
+    account (via :data:`_ACCOUNT_ARN` or :data:`_BARE_ACCOUNT`) survive here —
+    a service principal or a malformed entry is silently not an account,
+    the same way :func:`_account_of` treats anything else it cannot parse.
+    """
+    raw = principal if isinstance(principal, list) else [principal]
+    accounts = []
+    for entry in raw:
+        if not isinstance(entry, str):
+            continue
+        account = _account_of(entry)
+        if account is not None:
+            accounts.append(account)
+    return accounts
+
+
+def _account_of(principal: str) -> str | None:
+    """The 12-digit account inside a principal, whether it arrived as an ARN or bare.
+
+    A principal can also be an AWS service name (``lambda.amazonaws.com``) or
+    a federated identity ARN with no account-shaped segment in the position
+    this regex checks; both fall through to ``None`` rather than being
+    mistaken for a trusted outside account.
+    """
+    if _BARE_ACCOUNT.match(principal):
+        return principal
+    match = _ACCOUNT_ARN.match(principal)
+    return match.group(1) if match else None
+
+
+def _has_external_id(statement: dict[str, Any]) -> bool:
+    """Whether this statement conditions the trust on an ``sts:ExternalId``.
+
+    An external ID is not proof of who the other side is — a vendor and an
+    attacker who somehow learned the string would satisfy this identically —
+    but its presence is still worth recording: a trust unconditioned on
+    anything but the account number is the weaker of the two shapes vendors
+    actually use, and later tasks may want to tell them apart.
+    """
+    condition = statement.get("Condition")
+    if not isinstance(condition, dict):
+        return False
+    string_equals = condition.get("StringEquals")
+    if not isinstance(string_equals, dict):
+        return False
+    return bool(string_equals.get("sts:ExternalId"))
+
+
+def collect_trust_relationships(
+    client: Any, *, account_id: str, own_accounts: frozenset[str], refused: list[str]
+) -> tuple[list[DiscoveredProvider], list[ExternalPrincipal]]:
+    """Roles an outside AWS account can assume, and who those accounts belong to.
+
+    The most DORA-relevant channel in this module and the easiest to get
+    catastrophically wrong: a vendor with standing access to production is
+    exactly what a supervisor asks about, and inventing its name to fill a gap
+    would put a false counterparty in a regulatory filing. So this function
+    returns two lists rather than one — the vendors :func:`_vendor_accounts`
+    can name, and, separately, every trusted account it cannot. The second
+    list is not a lesser result; it is this channel's own finding, the same
+    way an empty channel elsewhere is a fact about the perimeter rather than a
+    failure to report one.
+
+    ``own_accounts`` is every account this scan's own perimeter already
+    covers — every Organizations member account read via :mod:`.aws`, or just
+    ``account_id`` on its own when Organizations was not reachable. A role
+    trusted by a sibling account, or by the very account being scanned, is not
+    a third party and must not appear as either a vendor or an unknown.
+
+    Needs only ``iam:ListRoles``: unlike :func:`collect_identity_providers`,
+    which pairs a ``List*`` and a ``Get*`` call per provider, ``list_roles``
+    already returns each role's ``AssumeRolePolicyDocument`` inline. One
+    denied listing costs the whole channel — there is no narrower call to fall
+    back to — and is appended to ``refused`` rather than raised. Past that,
+    one role with a trust policy this module cannot parse skips that role
+    alone: a single weird policy from years ago is never the reason the rest
+    of the account's trust relationships go unreported.
+    """
+    try:
+        response = readonly(client, "list_roles")
+    except Exception as e:  # noqa: BLE001 - a denial is a perimeter fact, not a crash
+        refused.append(f"{account_id} trust: iam:ListRoles denied ({type(e).__name__}: {e})")
+        return [], []
+
+    table = _vendor_accounts()
+    found: dict[str, DiscoveredProvider] = {}
+    unknown: list[ExternalPrincipal] = []
+
+    for role in response.get("Roles", []):
+        name = role.get("RoleName", "")
+        policy = _trust_policy(role.get("AssumeRolePolicyDocument"))
+        if policy is None:
+            refused.append(f"{account_id} trust: unreadable trust policy on role {name!r}")
+            continue
+
+        for statement in _statements(policy):
+            principal = statement.get("Principal")
+            if not isinstance(principal, dict):
+                continue
+            has_external_id = _has_external_id(statement)
+
+            for trusted in _principal_accounts(principal.get("AWS")):
+                if trusted in own_accounts or trusted == account_id:
+                    continue
+                vendor = table.get(trusted)
+                if vendor is None:
+                    unknown.append(
+                        ExternalPrincipal(account_id=trusted, role_name=name, has_external_id=has_external_id)
+                    )
+                    continue
+                existing = found.get(vendor)
+                if existing is None:
+                    found[vendor] = DiscoveredProvider(
+                        name=vendor,
+                        namespace="aws",
+                        registry="aws-trust",
+                        resource_count=1,
+                        resource_types=Counter({"assume_role_trust": 1}),
+                        source_files={f"aws:iam:{account_id}"},
+                    )
+                else:
+                    existing.resource_types["assume_role_trust"] += 1
+                    existing.resource_count += 1
+
+    return sorted(found.values(), key=lambda p: p.name), unknown
