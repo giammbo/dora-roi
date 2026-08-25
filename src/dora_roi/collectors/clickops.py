@@ -35,6 +35,7 @@ cost the whole scan any more than a missing IAM permission does.
 
 from __future__ import annotations
 
+import re
 from collections import Counter
 from dataclasses import dataclass
 from datetime import date
@@ -42,6 +43,7 @@ from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Any
 
 from dora_roi.collectors.aws import AwsError, annual_window, readonly
+from dora_roi.collectors.domains import vendor_for_host
 from dora_roi.collectors.tfstate import DiscoveredProvider
 from dora_roi.naming import vendor_key
 
@@ -50,7 +52,7 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 else:
     CostExplorerClient = Any
 
-__all__ = ["ClickopsError", "VendorFact", "collect_marketplace"]
+__all__ = ["ClickopsError", "VendorFact", "collect_identity_providers", "collect_marketplace"]
 
 #: Cost Explorer's name for the billing entity that groups every Marketplace
 #: seller's line items. It is also the placeholder AWS uses for a Marketplace
@@ -247,3 +249,113 @@ def _ce_client(profile: str | None) -> CostExplorerClient:
         ) from e
     # Cost Explorer is a global service with a us-east-1 endpoint.
     return boto3.Session(profile_name=profile).client("ce", region_name="us-east-1")
+
+
+#: Hostnames inside a SAML metadata document or an OIDC issuer URL. Deliberately
+#: a regex, never an XML parser: the metadata document comes from outside the
+#: tool, and parsing untrusted XML opens exactly the XXE surface this repo's
+#: own SECURITY.md names as a vulnerability class. The DNS channel in
+#: :mod:`.tfstate` mines hostnames out of Terraform state the same way, for the
+#: same reason — a hostname is all either channel ever needs.
+_HOST = re.compile(r"https?://([A-Za-z0-9.-]+)")
+
+#: The real IAM action name for every operation this channel calls, spelled out
+#: rather than derived from the operation name. `list_saml_providers` title-cases
+#: cleanly into `ListSAMLProviders`, but a transformation clever enough to get
+#: `SAML` and `OpenID` capitalised right by rule is not obviously more
+#: trustworthy than a four-entry table that is simply correct by inspection —
+#: and the name here is what a user pastes into their own IAM policy, so wrong
+#: is not an option.
+_ACTION_NAME: dict[str, str] = {
+    "list_saml_providers": "ListSAMLProviders",
+    "get_saml_provider": "GetSAMLProvider",
+    "list_open_id_connect_providers": "ListOpenIDConnectProviders",
+    "get_open_id_connect_provider": "GetOpenIDConnectProvider",
+}
+
+
+def collect_identity_providers(client: Any, *, account_id: str, refused: list[str]) -> list[DiscoveredProvider]:
+    """Federated identity providers: who authenticates into this account.
+
+    INFERRED, always — unlike :func:`collect_marketplace`, this channel never
+    reaches FILLED. A SAML metadata document or an OIDC issuer URL names a
+    hostname, and a hostname says who signs your people in; it does not say
+    which legal entity you signed a contract with.
+
+    Takes a client, not a profile: the CLI wiring constructs one session per
+    account and passes the IAM client straight in, the same convention
+    :func:`collect_marketplace` uses for Cost Explorer — nothing here decides
+    which account it is looking at beyond the label ``account_id`` gives it.
+
+    Every denial — on either ``list_*`` call, or on ``get_*`` for one provider
+    among several — is appended to ``refused`` and the channel carries on
+    rather than raising, so one unreadable provider never costs the others.
+    """
+    found: dict[str, DiscoveredProvider] = {}
+
+    for arn in _listed(client, "list_saml_providers", "SAMLProviderList", refused, account_id):
+        try:
+            document = readonly(client, "get_saml_provider", SAMLProviderArn=arn).get("SAMLMetadataDocument")
+        except Exception as e:  # noqa: BLE001 - one unreadable provider is not a failed scan
+            refused.append(_denial(account_id, "get_saml_provider", arn, e))
+            continue
+        _record(found, document or "", "saml_provider", account_id)
+
+    for arn in _listed(client, "list_open_id_connect_providers", "OpenIDConnectProviderList", refused, account_id):
+        try:
+            url = readonly(client, "get_open_id_connect_provider", OpenIDConnectProviderArn=arn).get("Url")
+        except Exception as e:  # noqa: BLE001 - same as above, for the OIDC side
+            refused.append(_denial(account_id, "get_open_id_connect_provider", arn, e))
+            continue
+        # AWS returns the issuer URL with or without a scheme depending on how
+        # it was registered; strip whichever it has (str.removeprefix, not
+        # lstrip — lstrip would strip characters, not a prefix, and mangle a
+        # bare host that happens to start with an 'h') and add back the one
+        # the regex expects, rather than assume either form.
+        host = (url or "").removeprefix("https://").removeprefix("http://")
+        _record(found, f"https://{host}", "oidc_provider", account_id)
+
+    return sorted(found.values(), key=lambda p: p.name)
+
+
+def _listed(client: Any, operation: str, key: str, refused: list[str], account_id: str) -> list[str]:
+    """Every provider ARN from one ``list_*`` call, or none if it was denied."""
+    try:
+        response = readonly(client, operation)
+    except Exception as e:  # noqa: BLE001 - a denial is a perimeter fact, not a crash
+        refused.append(f"{account_id} iam-idp: iam:{_ACTION_NAME[operation]} denied ({type(e).__name__}: {e})")
+        return []
+    return [entry["Arn"] for entry in response.get(key, []) if entry.get("Arn")]
+
+
+def _denial(account_id: str, operation: str, arn: str, error: Exception) -> str:
+    return f"{account_id} iam-idp: iam:{_ACTION_NAME[operation]} on {arn} ({type(error).__name__}: {error})"
+
+
+def _record(into: dict[str, DiscoveredProvider], blob: str, evidence: str, account_id: str) -> None:
+    """Credit one document's vendor(s) with one unit of ``evidence``.
+
+    A single SAML metadata document routinely names its own vendor's hostname
+    twice — once as ``entityID``, once as the SSO ``Location`` — and that is
+    one identity provider, not two. Matching is deduplicated to the *set* of
+    vendors the document names before anything is counted, so a document that
+    mentions the same vendor five times still counts as one ``saml_provider``,
+    the way one AWS API object always should — counting raw regex hits instead
+    would make the register's numbers a function of how a vendor happened to
+    write their metadata, not of how many providers actually exist.
+    """
+    vendors = {vendor for host in _HOST.findall(blob) if (vendor := vendor_for_host(host)) is not None}
+    for vendor in vendors:
+        existing = into.get(vendor)
+        if existing is None:
+            into[vendor] = DiscoveredProvider(
+                name=vendor,
+                namespace="aws",
+                registry="aws-iam-idp",
+                resource_count=1,
+                resource_types=Counter({evidence: 1}),
+                source_files={f"aws:iam:{account_id}"},
+            )
+        else:
+            existing.resource_types[evidence] += 1
+            existing.resource_count += 1

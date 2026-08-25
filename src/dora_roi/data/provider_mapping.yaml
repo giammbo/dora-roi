@@ -106,6 +106,14 @@ auth0:
   services: [S19, S04]
   notes: Okta subsidiary since 2021 — ultimate parent is Okta, Inc.
 
+onelogin:
+  vendor: OneLogin, Inc.
+  hq_country: US
+  services: [S19, S04]
+  notes: >-
+    Identity provider; acquired by One Identity (a Quest Software company) in
+    2021 — check the current contracting entity and ultimate parent.
+
 pagerduty:
   vendor: PagerDuty, Inc.
   hq_country: US
