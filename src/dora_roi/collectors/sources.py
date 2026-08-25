@@ -33,7 +33,17 @@ import yaml
 from dora_roi.collectors.aws import readonly
 from dora_roi.collectors.tfstate import STATE_SUFFIXES, TfstateError, resolve_state_paths
 
-__all__ = ["WORKSPACE_PREFIX", "SourceError", "StateSource", "fetch_sources", "load_sources", "workspace_of"]
+__all__ = [
+    "WORKSPACE_PREFIX",
+    "AwsAccount",
+    "AwsSweep",
+    "SourceError",
+    "StateSource",
+    "fetch_sources",
+    "load_aws_sweep",
+    "load_sources",
+    "workspace_of",
+]
 
 _S3_URI = re.compile(r"^s3://(?P<bucket>[^/]+)/(?P<key>.*)$")
 
@@ -76,8 +86,42 @@ class StateSource:
         return where
 
 
-def load_sources(path: str | Path) -> list[StateSource]:
-    """Read a sources YAML: a list of URIs, each with optional credentials."""
+@dataclass(frozen=True)
+class AwsAccount:
+    """One account to sweep, and how to get into it."""
+
+    id: str | None = None
+    profile: str | None = None
+    role_arn: str | None = None
+
+
+@dataclass(frozen=True)
+class AwsSweep:
+    """Which accounts the vendor channels read, and with whose credentials.
+
+    ``accounts`` is the explicit form and says exactly what will be read.
+    ``assume_role_name`` is the shortcut for an organisation too large to list
+    by hand: the role is tried in every account Organizations reports. The
+    shortcut is only honest because a role that is missing in seven accounts
+    out of twenty is recorded as refused rather than skipped in silence.
+    """
+
+    profile: str | None = None
+    accounts: tuple[AwsAccount, ...] = ()
+    assume_role_name: str | None = None
+
+
+_SWEEP_KEYS = frozenset({"profile", "accounts", "assume_role_name"})
+_ACCOUNT_KEYS = frozenset({"id", "profile", "role_arn"})
+
+
+def _document(path: str | Path) -> Any:
+    """Read a sources YAML file and parse it. Every failure becomes a `SourceError`.
+
+    Shared by :func:`load_sources` and :func:`load_aws_sweep`: they read the same
+    file, and reading it two different ways would give two different error
+    messages for one problem.
+    """
     path = Path(path)
     try:
         raw = path.read_text(encoding="utf-8")
@@ -87,9 +131,14 @@ def load_sources(path: str | Path) -> list[StateSource]:
         raise SourceError(f"could not read {path}: {e}") from e
 
     try:
-        document = yaml.safe_load(raw)
+        return yaml.safe_load(raw)
     except yaml.YAMLError as e:
         raise SourceError(f"{path} is not valid YAML: {e}") from e
+
+
+def load_sources(path: str | Path) -> list[StateSource]:
+    """Read a sources YAML: a list of URIs, each with optional credentials."""
+    document = _document(path)
 
     if document is None:
         return []
@@ -119,6 +168,40 @@ def load_sources(path: str | Path) -> list[StateSource]:
             )
         )
     return sources
+
+
+def load_aws_sweep(path: str | Path) -> AwsSweep | None:
+    """Read the ``aws:`` block of a sources YAML, if it has one."""
+    document = _document(path)
+    block = document.get("aws") if isinstance(document, dict) else None
+    if not isinstance(block, dict):
+        # `aws:` with everything commented out parses as None, and an absent
+        # block and an empty one mean the same thing: no sweep.
+        return None
+
+    unknown = set(block) - _SWEEP_KEYS
+    if unknown:
+        raise SourceError(f"unknown key(s) under `aws:` in {path}: {', '.join(sorted(unknown))}")
+
+    accounts: list[AwsAccount] = []
+    for entry in block.get("accounts") or []:
+        if not isinstance(entry, dict):
+            raise SourceError(f"each entry under `aws.accounts` must be a mapping, got {entry!r}")
+        strange = set(entry) - _ACCOUNT_KEYS
+        if strange:
+            raise SourceError(f"unknown key(s) under `aws.accounts` in {path}: {', '.join(sorted(strange))}")
+        if not entry.get("profile") and not entry.get("role_arn"):
+            raise SourceError(
+                f"account {entry.get('id', '?')} in {path} has neither `profile` nor `role_arn`: "
+                f"dora-roi will not guess which credentials to read an account with."
+            )
+        accounts.append(AwsAccount(id=entry.get("id"), profile=entry.get("profile"), role_arn=entry.get("role_arn")))
+
+    return AwsSweep(
+        profile=block.get("profile"),
+        accounts=tuple(accounts),
+        assume_role_name=block.get("assume_role_name"),
+    )
 
 
 def fetch_sources(

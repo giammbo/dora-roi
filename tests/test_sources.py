@@ -8,7 +8,7 @@ import boto3
 import pytest
 from moto import mock_aws
 
-from dora_roi.collectors.sources import SourceError, StateSource, fetch_sources, load_sources
+from dora_roi.collectors.sources import SourceError, StateSource, fetch_sources, load_aws_sweep, load_sources
 from dora_roi.collectors.tfstate import TfstateError, parse_many
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -327,3 +327,48 @@ class TestWorkspaces:
 
     def test_the_source_says_which_workspace_it_is(self) -> None:
         assert "workspace production" in str(StateSource(uri="s3://b/", workspace="production"))
+
+
+class TestAwsSweep:
+    def _write(self, tmp_path: Path, body: str) -> Path:
+        path = tmp_path / "sources.yaml"
+        path.write_text(body, encoding="utf-8")
+        return path
+
+    def test_no_aws_block_is_not_an_error(self, tmp_path: Path) -> None:
+        assert load_aws_sweep(self._write(tmp_path, "states:\n  - a.tfstate\n")) is None
+
+    def test_an_explicit_account_list_keeps_its_credentials(self, tmp_path: Path) -> None:
+        sweep = load_aws_sweep(
+            self._write(
+                tmp_path,
+                "aws:\n"
+                "  profile: management\n"
+                "  accounts:\n"
+                '    - id: "111122223333"\n'
+                "      role_arn: arn:aws:iam::111122223333:role/DoraRoiReadOnly\n"
+                "    - profile: staging\n",
+            )
+        )
+        assert sweep is not None
+        assert sweep.profile == "management"
+        assert sweep.accounts[0].role_arn == "arn:aws:iam::111122223333:role/DoraRoiReadOnly"
+        assert sweep.accounts[1].profile == "staging"
+
+    def test_the_assume_role_shortcut_is_read(self, tmp_path: Path) -> None:
+        sweep = load_aws_sweep(self._write(tmp_path, "aws:\n  assume_role_name: DoraRoiReadOnly\n"))
+        assert sweep is not None
+        assert sweep.assume_role_name == "DoraRoiReadOnly"
+
+    def test_a_typo_names_the_key_it_did_not_recognise(self, tmp_path: Path) -> None:
+        """Silently ignoring an unknown key is how a scan reads less than you asked."""
+        with pytest.raises(SourceError, match="assume_role_nmae"):
+            load_aws_sweep(self._write(tmp_path, "aws:\n  assume_role_nmae: X\n"))
+
+    def test_an_account_with_neither_profile_nor_role_is_refused(self, tmp_path: Path) -> None:
+        with pytest.raises(SourceError, match="profile.*role_arn"):
+            load_aws_sweep(self._write(tmp_path, 'aws:\n  accounts:\n    - id: "111122223333"\n'))
+
+    def test_an_aws_block_that_is_all_comments_is_not_a_sweep(self, tmp_path: Path) -> None:
+        """`aws:` with everything commented out parses as None, not as a dict."""
+        assert load_aws_sweep(self._write(tmp_path, "aws:\n  # profile: management\n")) is None
