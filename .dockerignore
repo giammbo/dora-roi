@@ -1,0 +1,20 @@
+.git/
+.venv/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+__pycache__/
+*.py[cod]
+build/
+dist/
+*.egg-info/
+
+# Specs and plans are host-side context, never part of an image.
+docs/
+
+# Never let a real state file or vendor overlay into the build context.
+*.tfstate
+*.tfstate.backup
+vendors.yaml
+out/
+work/

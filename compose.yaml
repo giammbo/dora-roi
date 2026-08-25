@@ -1,0 +1,37 @@
+services:
+  # The tool itself.
+  #   docker compose run --rm dora-roi scan -s /work/terraform.tfstate -o /out
+  dora-roi:
+    build:
+      context: .
+      target: base
+    image: dora-roi:latest
+    volumes:
+      # Read-only, and not by accident: golden rule 2 says collectors never
+      # mutate anything, and a tfstate is the single most dangerous file in an
+      # infrastructure repo to write to by mistake. Point DORA_WORKDIR at the
+      # tree holding your state files.
+      - ${DORA_WORKDIR:-./work}:/work:ro
+      # The only writable path in the container.
+      - ./out:/out
+    working_dir: /work
+
+  # Every check runs here: pytest, ruff, mypy.
+  #   docker compose run --rm dev                 # pytest (the default CMD)
+  #   docker compose run --rm dev ruff check .
+  #   docker compose run --rm dev mypy src
+  dev:
+    build:
+      context: .
+      target: dev
+      args:
+        # Override to reproduce a CI matrix leg locally:
+        #   PYTHON_VERSION=3.12 docker compose build dev
+        PYTHON_VERSION: ${PYTHON_VERSION:-3.11}
+    image: dora-roi-dev:latest
+    volumes:
+      # The whole repo, so an edit is live without a rebuild. This does not
+      # shadow the virtualenv: it lives at /venv, outside /app — see the
+      # Dockerfile comment on UV_PROJECT_ENVIRONMENT.
+      - .:/app
+    working_dir: /app

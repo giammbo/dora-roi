@@ -1,0 +1,2900 @@
+{
+ "_eba_key_columns": {
+  "columns": {
+   "B_01.01": [
+    "0010"
+   ],
+   "B_01.02": [
+    "0010"
+   ],
+   "B_01.03": [
+    "0010",
+    "0020"
+   ],
+   "B_02.01": [
+    "0010"
+   ],
+   "B_02.02": [
+    "0010",
+    "0020",
+    "0030",
+    "0050",
+    "0060",
+    "0130",
+    "0150",
+    "0160"
+   ],
+   "B_02.03": [
+    "0010",
+    "0020"
+   ],
+   "B_03.01": [
+    "0010",
+    "0020"
+   ],
+   "B_03.02": [
+    "0010",
+    "0020"
+   ],
+   "B_03.03": [
+    "0010",
+    "0020"
+   ],
+   "B_04.01": [
+    "0010",
+    "0020",
+    "0040"
+   ],
+   "B_05.01": [
+    "0010"
+   ],
+   "B_05.02": [
+    "0010",
+    "0020",
+    "0030",
+    "0050",
+    "0060"
+   ],
+   "B_06.01": [
+    "0010",
+    "0040"
+   ],
+   "B_07.01": [
+    "0010",
+    "0020",
+    "0040"
+   ],
+   "B_99.01": []
+  },
+  "source": "annotated table layout, cells marked <Key value>"
+ },
+ "_eba_required_columns": {
+  "columns": {
+   "B_01.01": [
+    "0010",
+    "0020",
+    "0030",
+    "0040",
+    "0050",
+    "0060"
+   ],
+   "B_01.02": [
+    "0020",
+    "0030",
+    "0040",
+    "0050",
+    "0060",
+    "0070",
+    "0080",
+    "0090",
+    "0110"
+   ],
+   "B_01.03": [
+    "0010",
+    "0020",
+    "0030",
+    "0040"
+   ],
+   "B_02.01": [
+    "0020",
+    "0030",
+    "0040",
+    "0050"
+   ],
+   "B_02.02": [
+    "0040",
+    "0050",
+    "0060",
+    "0070",
+    "0080"
+   ],
+   "B_04.01": [
+    "0030"
+   ],
+   "B_05.01": [
+    "0020",
+    "0030",
+    "0050",
+    "0060",
+    "0070",
+    "0080",
+    "0110"
+   ],
+   "B_06.01": [
+    "0020",
+    "0030",
+    "0050",
+    "0070",
+    "0080",
+    "0090",
+    "0100"
+   ],
+   "B_07.01": [
+    "0030",
+    "0060"
+   ]
+  },
+  "severity": "warning",
+  "source": "EBA Validation Rules 2025-03-20, active DORA rules of the form not(isnull({...}))"
+ },
+ "contractual_arrangement": {
+  "source": "B0201.LISTB02010020",
+  "values": [
+   {
+    "label": "Standalone arrangement",
+    "qname": "eba_CO:x1"
+   },
+   {
+    "label": "Overarching arrangement",
+    "qname": "eba_CO:x2"
+   },
+   {
+    "label": "Subsequent or associated arrangement",
+    "qname": "eba_CO:x3"
+   }
+  ]
+ },
+ "country": {
+  "source": "B0101.LISTCOUNTRY",
+  "values": [
+   {
+    "label": "MAURITANIA",
+    "qname": "eba_GA:MR"
+   },
+   {
+    "label": "MAURITIUS",
+    "qname": "eba_GA:MU"
+   },
+   {
+    "label": "MAYOTTE",
+    "qname": "eba_GA:YT"
+   },
+   {
+    "label": "MEXICO",
+    "qname": "eba_GA:MX"
+   },
+   {
+    "label": "MICRONESIA, FEDERATED STATES OF",
+    "qname": "eba_GA:FM"
+   },
+   {
+    "label": "MOLDOVA, REPUBLIC OF",
+    "qname": "eba_GA:MD"
+   },
+   {
+    "label": "MONACO",
+    "qname": "eba_GA:MC"
+   },
+   {
+    "label": "MONGOLIA",
+    "qname": "eba_GA:MN"
+   },
+   {
+    "label": "MONTENEGRO",
+    "qname": "eba_GA:ME"
+   },
+   {
+    "label": "MONTSERRAT",
+    "qname": "eba_GA:MS"
+   },
+   {
+    "label": "MOROCCO",
+    "qname": "eba_GA:MA"
+   },
+   {
+    "label": "MOZAMBIQUE",
+    "qname": "eba_GA:MZ"
+   },
+   {
+    "label": "MYANMAR",
+    "qname": "eba_GA:MM"
+   },
+   {
+    "label": "NAMIBIA",
+    "qname": "eba_GA:NA"
+   },
+   {
+    "label": "NAURU",
+    "qname": "eba_GA:NR"
+   },
+   {
+    "label": "NEPAL",
+    "qname": "eba_GA:NP"
+   },
+   {
+    "label": "NEW CALEDONIA",
+    "qname": "eba_GA:NC"
+   },
+   {
+    "label": "NEW ZEALAND",
+    "qname": "eba_GA:NZ"
+   },
+   {
+    "label": "NICARAGUA",
+    "qname": "eba_GA:NI"
+   },
+   {
+    "label": "NIGER",
+    "qname": "eba_GA:NE"
+   },
+   {
+    "label": "NIGERIA",
+    "qname": "eba_GA:NG"
+   },
+   {
+    "label": "NIUE",
+    "qname": "eba_GA:NU"
+   },
+   {
+    "label": "NORFOLK ISLAND",
+    "qname": "eba_GA:NF"
+   },
+   {
+    "label": "NORTHERN MARIANA ISLANDS",
+    "qname": "eba_GA:MP"
+   },
+   {
+    "label": "OMAN",
+    "qname": "eba_GA:OM"
+   },
+   {
+    "label": "PAKISTAN",
+    "qname": "eba_GA:PK"
+   },
+   {
+    "label": "PALAU",
+    "qname": "eba_GA:PW"
+   },
+   {
+    "label": "PALESTINIAN TERRITORY, OCCUPIED",
+    "qname": "eba_GA:PS"
+   },
+   {
+    "label": "PANAMA",
+    "qname": "eba_GA:PA"
+   },
+   {
+    "label": "PAPUA NEW GUINEA",
+    "qname": "eba_GA:PG"
+   },
+   {
+    "label": "PARAGUAY",
+    "qname": "eba_GA:PY"
+   },
+   {
+    "label": "MARTINIQUE",
+    "qname": "eba_GA:MQ"
+   },
+   {
+    "label": "MARSHALL ISLANDS",
+    "qname": "eba_GA:MH"
+   },
+   {
+    "label": "MALI",
+    "qname": "eba_GA:ML"
+   },
+   {
+    "label": "MALDIVES",
+    "qname": "eba_GA:MV"
+   },
+   {
+    "label": "MALAYSIA",
+    "qname": "eba_GA:MY"
+   },
+   {
+    "label": "MALAWI",
+    "qname": "eba_GA:MW"
+   },
+   {
+    "label": "MADAGASCAR",
+    "qname": "eba_GA:MG"
+   },
+   {
+    "label": "MACAO",
+    "qname": "eba_GA:MO"
+   },
+   {
+    "label": "LIECHTENSTEIN",
+    "qname": "eba_GA:LI"
+   },
+   {
+    "label": "LIBYA",
+    "qname": "eba_GA:LY"
+   },
+   {
+    "label": "LIBERIA",
+    "qname": "eba_GA:LR"
+   },
+   {
+    "label": "LESOTHO",
+    "qname": "eba_GA:LS"
+   },
+   {
+    "label": "LEBANON",
+    "qname": "eba_GA:LB"
+   },
+   {
+    "label": "LAO PEOPLE'S DEMOCRATIC REPUBLIC",
+    "qname": "eba_GA:LA"
+   },
+   {
+    "label": "KYRGYZSTAN",
+    "qname": "eba_GA:KG"
+   },
+   {
+    "label": "KUWAIT",
+    "qname": "eba_GA:KW"
+   },
+   {
+    "label": "KOREA, REPUBLIC OF",
+    "qname": "eba_GA:KR"
+   },
+   {
+    "label": "KOREA, DEMOCRATIC PEOPLE'S REPUBLIC OF",
+    "qname": "eba_GA:KP"
+   },
+   {
+    "label": "KIRIBATI",
+    "qname": "eba_GA:KI"
+   },
+   {
+    "label": "KENYA",
+    "qname": "eba_GA:KE"
+   },
+   {
+    "label": "KAZAKHSTAN",
+    "qname": "eba_GA:KZ"
+   },
+   {
+    "label": "JORDAN",
+    "qname": "eba_GA:JO"
+   },
+   {
+    "label": "JERSEY",
+    "qname": "eba_GA:JE"
+   },
+   {
+    "label": "JAMAICA",
+    "qname": "eba_GA:JM"
+   },
+   {
+    "label": "ISRAEL",
+    "qname": "eba_GA:IL"
+   },
+   {
+    "label": "ISLE OF MAN",
+    "qname": "eba_GA:IM"
+   },
+   {
+    "label": "IRAQ",
+    "qname": "eba_GA:IQ"
+   },
+   {
+    "label": "IRAN, ISLAMIC REPUBLIC OF",
+    "qname": "eba_GA:IR"
+   },
+   {
+    "label": "INDONESIA",
+    "qname": "eba_GA:ID"
+   },
+   {
+    "label": "INDIA",
+    "qname": "eba_GA:IN"
+   },
+   {
+    "label": "ICELAND",
+    "qname": "eba_GA:IS"
+   },
+   {
+    "label": "KOSOVO",
+    "qname": "eba_GA:XK"
+   },
+   {
+    "label": "ZIMBABWE",
+    "qname": "eba_GA:ZW"
+   },
+   {
+    "label": "ZAMBIA",
+    "qname": "eba_GA:ZM"
+   },
+   {
+    "label": "YEMEN",
+    "qname": "eba_GA:YE"
+   },
+   {
+    "label": "WESTERN SAHARA",
+    "qname": "eba_GA:EH"
+   },
+   {
+    "label": "WALLIS AND FUTUNA",
+    "qname": "eba_GA:WF"
+   },
+   {
+    "label": "VIRGIN ISLANDS, U.S.",
+    "qname": "eba_GA:VI"
+   },
+   {
+    "label": "VIRGIN ISLANDS, BRITISH",
+    "qname": "eba_GA:VG"
+   },
+   {
+    "label": "VIET NAM",
+    "qname": "eba_GA:VN"
+   },
+   {
+    "label": "VENEZUELA, BOLIVARIAN REPUBLIC OF",
+    "qname": "eba_GA:VE"
+   },
+   {
+    "label": "VANUATU",
+    "qname": "eba_GA:VU"
+   },
+   {
+    "label": "UZBEKISTAN",
+    "qname": "eba_GA:UZ"
+   },
+   {
+    "label": "URUGUAY",
+    "qname": "eba_GA:UY"
+   },
+   {
+    "label": "UNITED STATES MINOR OUTLYING ISLANDS",
+    "qname": "eba_GA:UM"
+   },
+   {
+    "label": "UNITED ARAB EMIRATES",
+    "qname": "eba_GA:AE"
+   },
+   {
+    "label": "UGANDA",
+    "qname": "eba_GA:UG"
+   },
+   {
+    "label": "TUVALU",
+    "qname": "eba_GA:TV"
+   },
+   {
+    "label": "TURKS AND CAICOS ISLANDS",
+    "qname": "eba_GA:TC"
+   },
+   {
+    "label": "TURKMENISTAN",
+    "qname": "eba_GA:TM"
+   },
+   {
+    "label": "TUNISIA",
+    "qname": "eba_GA:TN"
+   },
+   {
+    "label": "TRINIDAD AND TOBAGO",
+    "qname": "eba_GA:TT"
+   },
+   {
+    "label": "TONGA",
+    "qname": "eba_GA:TO"
+   },
+   {
+    "label": "TOKELAU",
+    "qname": "eba_GA:TK"
+   },
+   {
+    "label": "TOGO",
+    "qname": "eba_GA:TG"
+   },
+   {
+    "label": "TIMOR-LESTE",
+    "qname": "eba_GA:TL"
+   },
+   {
+    "label": "THAILAND",
+    "qname": "eba_GA:TH"
+   },
+   {
+    "label": "TANZANIA, UNITED REPUBLIC OF",
+    "qname": "eba_GA:TZ"
+   },
+   {
+    "label": "TAJIKISTAN",
+    "qname": "eba_GA:TJ"
+   },
+   {
+    "label": "TAIWAN, PROVINCE OF CHINA",
+    "qname": "eba_GA:TW"
+   },
+   {
+    "label": "SYRIAN ARAB REPUBLIC",
+    "qname": "eba_GA:SY"
+   },
+   {
+    "label": "SWAZILAND",
+    "qname": "eba_GA:SZ"
+   },
+   {
+    "label": "SVALBARD AND JAN MAYEN",
+    "qname": "eba_GA:SJ"
+   },
+   {
+    "label": "SURINAME",
+    "qname": "eba_GA:SR"
+   },
+   {
+    "label": "SUDAN",
+    "qname": "eba_GA:SD"
+   },
+   {
+    "label": "SRI LANKA",
+    "qname": "eba_GA:LK"
+   },
+   {
+    "label": "SOUTH SUDAN",
+    "qname": "eba_GA:SS"
+   },
+   {
+    "label": "SOUTH GEORGIA AND THE SOUTH SANDWICH ISLANDS",
+    "qname": "eba_GA:GS"
+   },
+   {
+    "label": "SOUTH AFRICA",
+    "qname": "eba_GA:ZA"
+   },
+   {
+    "label": "SOMALIA",
+    "qname": "eba_GA:SO"
+   },
+   {
+    "label": "SOLOMON ISLANDS",
+    "qname": "eba_GA:SB"
+   },
+   {
+    "label": "SINT MAARTEN (DUTCH PART)",
+    "qname": "eba_GA:SX"
+   },
+   {
+    "label": "SINGAPORE",
+    "qname": "eba_GA:SG"
+   },
+   {
+    "label": "SIERRA LEONE",
+    "qname": "eba_GA:SL"
+   },
+   {
+    "label": "SEYCHELLES",
+    "qname": "eba_GA:SC"
+   },
+   {
+    "label": "SENEGAL",
+    "qname": "eba_GA:SN"
+   },
+   {
+    "label": "SAUDI ARABIA",
+    "qname": "eba_GA:SA"
+   },
+   {
+    "label": "SAO TOME AND PRINCIPE",
+    "qname": "eba_GA:ST"
+   },
+   {
+    "label": "SAN MARINO",
+    "qname": "eba_GA:SM"
+   },
+   {
+    "label": "SAMOA",
+    "qname": "eba_GA:WS"
+   },
+   {
+    "label": "SAINT VINCENT AND THE GRENADINES",
+    "qname": "eba_GA:VC"
+   },
+   {
+    "label": "SAINT PIERRE AND MIQUELON",
+    "qname": "eba_GA:PM"
+   },
+   {
+    "label": "SAINT MARTIN (FRENCH PART)",
+    "qname": "eba_GA:MF"
+   },
+   {
+    "label": "SAINT LUCIA",
+    "qname": "eba_GA:LC"
+   },
+   {
+    "label": "SAINT KITTS AND NEVIS",
+    "qname": "eba_GA:KN"
+   },
+   {
+    "label": "SAINT HELENA, ASCENSION AND TRISTAN DA CUNHA",
+    "qname": "eba_GA:SH"
+   },
+   {
+    "label": "SAINT BARTHÉLEMY",
+    "qname": "eba_GA:BL"
+   },
+   {
+    "label": "RWANDA",
+    "qname": "eba_GA:RW"
+   },
+   {
+    "label": "RÉUNION",
+    "qname": "eba_GA:RE"
+   },
+   {
+    "label": "QATAR",
+    "qname": "eba_GA:QA"
+   },
+   {
+    "label": "PUERTO RICO",
+    "qname": "eba_GA:PR"
+   },
+   {
+    "label": "PITCAIRN",
+    "qname": "eba_GA:PN"
+   },
+   {
+    "label": "PHILIPPINES",
+    "qname": "eba_GA:PH"
+   },
+   {
+    "label": "PERU",
+    "qname": "eba_GA:PE"
+   },
+   {
+    "label": "BONAIRE, SINT EUSTATIUS AND SABA",
+    "qname": "eba_GA:BQ"
+   },
+   {
+    "label": "BOLIVIA, PLURINATIONAL STATE OF",
+    "qname": "eba_GA:BO"
+   },
+   {
+    "label": "BHUTAN",
+    "qname": "eba_GA:BT"
+   },
+   {
+    "label": "BERMUDA",
+    "qname": "eba_GA:BM"
+   },
+   {
+    "label": "BENIN",
+    "qname": "eba_GA:BJ"
+   },
+   {
+    "label": "BELIZE",
+    "qname": "eba_GA:BZ"
+   },
+   {
+    "label": "BELARUS",
+    "qname": "eba_GA:BY"
+   },
+   {
+    "label": "BARBADOS",
+    "qname": "eba_GA:BB"
+   },
+   {
+    "label": "BANGLADESH",
+    "qname": "eba_GA:BD"
+   },
+   {
+    "label": "BAHRAIN",
+    "qname": "eba_GA:BH"
+   },
+   {
+    "label": "BAHAMAS",
+    "qname": "eba_GA:BS"
+   },
+   {
+    "label": "AZERBAIJAN",
+    "qname": "eba_GA:AZ"
+   },
+   {
+    "label": "AUSTRALIA",
+    "qname": "eba_GA:AU"
+   },
+   {
+    "label": "ARUBA",
+    "qname": "eba_GA:AW"
+   },
+   {
+    "label": "ARMENIA",
+    "qname": "eba_GA:AM"
+   },
+   {
+    "label": "ARGENTINA",
+    "qname": "eba_GA:AR"
+   },
+   {
+    "label": "ANTIGUA AND BARBUDA",
+    "qname": "eba_GA:AG"
+   },
+   {
+    "label": "ANTARCTICA",
+    "qname": "eba_GA:AQ"
+   },
+   {
+    "label": "ANGUILLA",
+    "qname": "eba_GA:AI"
+   },
+   {
+    "label": "ANGOLA",
+    "qname": "eba_GA:AO"
+   },
+   {
+    "label": "ANDORRA",
+    "qname": "eba_GA:AD"
+   },
+   {
+    "label": "AMERICAN SAMOA",
+    "qname": "eba_GA:AS"
+   },
+   {
+    "label": "ALGERIA",
+    "qname": "eba_GA:DZ"
+   },
+   {
+    "label": "ÅLAND ISLANDS",
+    "qname": "eba_GA:AX"
+   },
+   {
+    "label": "AFGHANISTAN",
+    "qname": "eba_GA:AF"
+   },
+   {
+    "label": "UNITED STATES",
+    "qname": "eba_GA:US"
+   },
+   {
+    "label": "UNITED KINGDOM",
+    "qname": "eba_GA:GB"
+   },
+   {
+    "label": "UKRAINE",
+    "qname": "eba_GA:UA"
+   },
+   {
+    "label": "TURKEY",
+    "qname": "eba_GA:TR"
+   },
+   {
+    "label": "SWITZERLAND",
+    "qname": "eba_GA:CH"
+   },
+   {
+    "label": "SWEDEN",
+    "qname": "eba_GA:SE"
+   },
+   {
+    "label": "SPAIN",
+    "qname": "eba_GA:ES"
+   },
+   {
+    "label": "SLOVENIA",
+    "qname": "eba_GA:SI"
+   },
+   {
+    "label": "SLOVAKIA",
+    "qname": "eba_GA:SK"
+   },
+   {
+    "label": "SERBIA",
+    "qname": "eba_GA:RS"
+   },
+   {
+    "label": "RUSSIAN FEDERATION",
+    "qname": "eba_GA:RU"
+   },
+   {
+    "label": "ROMANIA",
+    "qname": "eba_GA:RO"
+   },
+   {
+    "label": "PORTUGAL",
+    "qname": "eba_GA:PT"
+   },
+   {
+    "label": "POLAND",
+    "qname": "eba_GA:PL"
+   },
+   {
+    "label": "Other Countries",
+    "qname": "eba_GA:x28"
+   },
+   {
+    "label": "NORWAY",
+    "qname": "eba_GA:NO"
+   },
+   {
+    "label": "NETHERLANDS",
+    "qname": "eba_GA:NL"
+   },
+   {
+    "label": "MALTA",
+    "qname": "eba_GA:MT"
+   },
+   {
+    "label": "NORTH MACEDONIA",
+    "qname": "eba_GA:MK"
+   },
+   {
+    "label": "LUXEMBOURG",
+    "qname": "eba_GA:LU"
+   },
+   {
+    "label": "LITHUANIA",
+    "qname": "eba_GA:LT"
+   },
+   {
+    "label": "LATVIA",
+    "qname": "eba_GA:LV"
+   },
+   {
+    "label": "JAPAN",
+    "qname": "eba_GA:JP"
+   },
+   {
+    "label": "ITALY",
+    "qname": "eba_GA:IT"
+   },
+   {
+    "label": "IRELAND",
+    "qname": "eba_GA:IE"
+   },
+   {
+    "label": "HUNGARY",
+    "qname": "eba_GA:HU"
+   },
+   {
+    "label": "GREECE",
+    "qname": "eba_GA:GR"
+   },
+   {
+    "label": "GERMANY",
+    "qname": "eba_GA:DE"
+   },
+   {
+    "label": "FRANCE",
+    "qname": "eba_GA:FR"
+   },
+   {
+    "label": "FINLAND",
+    "qname": "eba_GA:FI"
+   },
+   {
+    "label": "ESTONIA",
+    "qname": "eba_GA:EE"
+   },
+   {
+    "label": "DENMARK",
+    "qname": "eba_GA:DK"
+   },
+   {
+    "label": "CZECH REPUBLIC",
+    "qname": "eba_GA:CZ"
+   },
+   {
+    "label": "CYPRUS",
+    "qname": "eba_GA:CY"
+   },
+   {
+    "label": "BULGARIA",
+    "qname": "eba_GA:BG"
+   },
+   {
+    "label": "BELGIUM",
+    "qname": "eba_GA:BE"
+   },
+   {
+    "label": "AUSTRIA",
+    "qname": "eba_GA:AT"
+   },
+   {
+    "label": "ALBANIA",
+    "qname": "eba_GA:AL"
+   },
+   {
+    "label": "HONG KONG",
+    "qname": "eba_GA:HK"
+   },
+   {
+    "label": "HONDURAS",
+    "qname": "eba_GA:HN"
+   },
+   {
+    "label": "HOLY SEE (VATICAN CITY STATE)",
+    "qname": "eba_GA:VA"
+   },
+   {
+    "label": "HEARD ISLAND AND MCDONALD ISLANDS",
+    "qname": "eba_GA:HM"
+   },
+   {
+    "label": "HAITI",
+    "qname": "eba_GA:HT"
+   },
+   {
+    "label": "GUYANA",
+    "qname": "eba_GA:GY"
+   },
+   {
+    "label": "GUINEA-BISSAU",
+    "qname": "eba_GA:GW"
+   },
+   {
+    "label": "GUINEA",
+    "qname": "eba_GA:GN"
+   },
+   {
+    "label": "GUERNSEY",
+    "qname": "eba_GA:GG"
+   },
+   {
+    "label": "GUATEMALA",
+    "qname": "eba_GA:GT"
+   },
+   {
+    "label": "GUAM",
+    "qname": "eba_GA:GU"
+   },
+   {
+    "label": "GUADELOUPE",
+    "qname": "eba_GA:GP"
+   },
+   {
+    "label": "GRENADA",
+    "qname": "eba_GA:GD"
+   },
+   {
+    "label": "GREENLAND",
+    "qname": "eba_GA:GL"
+   },
+   {
+    "label": "GIBRALTAR",
+    "qname": "eba_GA:GI"
+   },
+   {
+    "label": "GHANA",
+    "qname": "eba_GA:GH"
+   },
+   {
+    "label": "GEORGIA",
+    "qname": "eba_GA:GE"
+   },
+   {
+    "label": "GAMBIA",
+    "qname": "eba_GA:GM"
+   },
+   {
+    "label": "GABON",
+    "qname": "eba_GA:GA"
+   },
+   {
+    "label": "FRENCH SOUTHERN TERRITORIES",
+    "qname": "eba_GA:TF"
+   },
+   {
+    "label": "FRENCH POLYNESIA",
+    "qname": "eba_GA:PF"
+   },
+   {
+    "label": "FRENCH GUIANA",
+    "qname": "eba_GA:GF"
+   },
+   {
+    "label": "FIJI",
+    "qname": "eba_GA:FJ"
+   },
+   {
+    "label": "FAROE ISLANDS",
+    "qname": "eba_GA:FO"
+   },
+   {
+    "label": "FALKLAND ISLANDS (MALVINAS)",
+    "qname": "eba_GA:FK"
+   },
+   {
+    "label": "ETHIOPIA",
+    "qname": "eba_GA:ET"
+   },
+   {
+    "label": "ERITREA",
+    "qname": "eba_GA:ER"
+   },
+   {
+    "label": "EQUATORIAL GUINEA",
+    "qname": "eba_GA:GQ"
+   },
+   {
+    "label": "EL SALVADOR",
+    "qname": "eba_GA:SV"
+   },
+   {
+    "label": "EGYPT",
+    "qname": "eba_GA:EG"
+   },
+   {
+    "label": "ECUADOR",
+    "qname": "eba_GA:EC"
+   },
+   {
+    "label": "DOMINICAN REPUBLIC",
+    "qname": "eba_GA:DO"
+   },
+   {
+    "label": "DOMINICA",
+    "qname": "eba_GA:DM"
+   },
+   {
+    "label": "DJIBOUTI",
+    "qname": "eba_GA:DJ"
+   },
+   {
+    "label": "CURAÇAO",
+    "qname": "eba_GA:CW"
+   },
+   {
+    "label": "CUBA",
+    "qname": "eba_GA:CU"
+   },
+   {
+    "label": "CROATIA",
+    "qname": "eba_GA:HR"
+   },
+   {
+    "label": "CÔTE D'IVOIRE",
+    "qname": "eba_GA:CI"
+   },
+   {
+    "label": "COSTA RICA",
+    "qname": "eba_GA:CR"
+   },
+   {
+    "label": "COOK ISLANDS",
+    "qname": "eba_GA:CK"
+   },
+   {
+    "label": "CONGO, THE DEMOCRATIC REPUBLIC OF THE",
+    "qname": "eba_GA:CD"
+   },
+   {
+    "label": "CONGO",
+    "qname": "eba_GA:CG"
+   },
+   {
+    "label": "COMOROS",
+    "qname": "eba_GA:KM"
+   },
+   {
+    "label": "COLOMBIA",
+    "qname": "eba_GA:CO"
+   },
+   {
+    "label": "COCOS (KEELING) ISLANDS",
+    "qname": "eba_GA:CC"
+   },
+   {
+    "label": "CHRISTMAS ISLAND",
+    "qname": "eba_GA:CX"
+   },
+   {
+    "label": "CHINA",
+    "qname": "eba_GA:CN"
+   },
+   {
+    "label": "CHILE",
+    "qname": "eba_GA:CL"
+   },
+   {
+    "label": "CHAD",
+    "qname": "eba_GA:TD"
+   },
+   {
+    "label": "CENTRAL AFRICAN REPUBLIC",
+    "qname": "eba_GA:CF"
+   },
+   {
+    "label": "CAYMAN ISLANDS",
+    "qname": "eba_GA:KY"
+   },
+   {
+    "label": "CAPE VERDE",
+    "qname": "eba_GA:CV"
+   },
+   {
+    "label": "CANADA",
+    "qname": "eba_GA:CA"
+   },
+   {
+    "label": "CAMEROON",
+    "qname": "eba_GA:CM"
+   },
+   {
+    "label": "CAMBODIA",
+    "qname": "eba_GA:KH"
+   },
+   {
+    "label": "BURUNDI",
+    "qname": "eba_GA:BI"
+   },
+   {
+    "label": "BURKINA FASO",
+    "qname": "eba_GA:BF"
+   },
+   {
+    "label": "BRUNEI DARUSSALAM",
+    "qname": "eba_GA:BN"
+   },
+   {
+    "label": "BRITISH INDIAN OCEAN TERRITORY",
+    "qname": "eba_GA:IO"
+   },
+   {
+    "label": "BRAZIL",
+    "qname": "eba_GA:BR"
+   },
+   {
+    "label": "BOUVET ISLAND",
+    "qname": "eba_GA:BV"
+   },
+   {
+    "label": "BOTSWANA",
+    "qname": "eba_GA:BW"
+   },
+   {
+    "label": "BOSNIA AND HERZEGOVINA",
+    "qname": "eba_GA:BA"
+   }
+  ]
+ },
+ "criticality": {
+  "source": "B0601.LISTB06010050",
+  "values": [
+   {
+    "label": "Assessment not performed",
+    "qname": "eba_BT:x21"
+   },
+   {
+    "label": "Yes",
+    "qname": "eba_BT:x28"
+   },
+   {
+    "label": "No",
+    "qname": "eba_BT:x29"
+   }
+  ]
+ },
+ "currency": {
+  "source": "B0102.LISTCURRENCY",
+  "values": [
+   {
+    "label": "Balboa",
+    "qname": "eba_CU:PAB"
+   },
+   {
+    "label": "Barbados Dollar",
+    "qname": "eba_CU:BBD"
+   },
+   {
+    "label": "Belarussian Ruble (2000 Series)",
+    "qname": "eba_CU:BYR"
+   },
+   {
+    "label": "Belize Dollar",
+    "qname": "eba_CU:BZD"
+   },
+   {
+    "label": "Bermudian Dollar",
+    "qname": "eba_CU:BMD"
+   },
+   {
+    "label": "Bolivar",
+    "qname": "eba_CU:VEF"
+   },
+   {
+    "label": "Boliviano",
+    "qname": "eba_CU:BOB"
+   },
+   {
+    "label": "Brunei Dollar",
+    "qname": "eba_CU:BND"
+   },
+   {
+    "label": "Burundi Franc",
+    "qname": "eba_CU:BIF"
+   },
+   {
+    "label": "Cape Verde Escudo",
+    "qname": "eba_CU:CVE"
+   },
+   {
+    "label": "Cayman Islands Dollar",
+    "qname": "eba_CU:KYD"
+   },
+   {
+    "label": "CFP Franc",
+    "qname": "eba_CU:XPF"
+   },
+   {
+    "label": "Chilean Peso",
+    "qname": "eba_CU:CLP"
+   },
+   {
+    "label": "Colombian Peso",
+    "qname": "eba_CU:COP"
+   },
+   {
+    "label": "Comoro Franc",
+    "qname": "eba_CU:KMF"
+   },
+   {
+    "label": "Congolese Franc",
+    "qname": "eba_CU:CDF"
+   },
+   {
+    "label": "Convertible Mark",
+    "qname": "eba_CU:BAM"
+   },
+   {
+    "label": "Cordoba Oro",
+    "qname": "eba_CU:NIO"
+   },
+   {
+    "label": "Costa Rican Colon",
+    "qname": "eba_CU:CRC"
+   },
+   {
+    "label": "Cuban Peso",
+    "qname": "eba_CU:CUP"
+   },
+   {
+    "label": "Dalasi",
+    "qname": "eba_CU:GMD"
+   },
+   {
+    "label": "Djibouti Franc",
+    "qname": "eba_CU:DJF"
+   },
+   {
+    "label": "Dobra",
+    "qname": "eba_CU:STD"
+   },
+   {
+    "label": "Dominican Peso",
+    "qname": "eba_CU:DOP"
+   },
+   {
+    "label": "Dong",
+    "qname": "eba_CU:VND"
+   },
+   {
+    "label": "East Caribbean Dollar",
+    "qname": "eba_CU:XCD"
+   },
+   {
+    "label": "El Salvador Colon",
+    "qname": "eba_CU:SVC"
+   },
+   {
+    "label": "Ethiopian Birr",
+    "qname": "eba_CU:ETB"
+   },
+   {
+    "label": "Falkland Islands Pound",
+    "qname": "eba_CU:FKP"
+   },
+   {
+    "label": "Fiji Dollar",
+    "qname": "eba_CU:FJD"
+   },
+   {
+    "label": "Ghana Cedi",
+    "qname": "eba_CU:GHS"
+   },
+   {
+    "label": "Gibraltar Pound",
+    "qname": "eba_CU:GIP"
+   },
+   {
+    "label": "Gourde",
+    "qname": "eba_CU:HTG"
+   },
+   {
+    "label": "Guarani",
+    "qname": "eba_CU:PYG"
+   },
+   {
+    "label": "Guinea Franc",
+    "qname": "eba_CU:GNF"
+   },
+   {
+    "label": "Guyana Dollar",
+    "qname": "eba_CU:GYD"
+   },
+   {
+    "label": "Indian Rupee",
+    "qname": "eba_CU:INR"
+   },
+   {
+    "label": "Iranian Rial",
+    "qname": "eba_CU:IRR"
+   },
+   {
+    "label": "Iraqi Dinar",
+    "qname": "eba_CU:IQD"
+   },
+   {
+    "label": "Jamaican Dollar",
+    "qname": "eba_CU:JMD"
+   },
+   {
+    "label": "Jordanian Dinar",
+    "qname": "eba_CU:JOD"
+   },
+   {
+    "label": "Lek",
+    "qname": "eba_CU:ALL"
+   },
+   {
+    "label": "Argentine Peso",
+    "qname": "eba_CU:ARS"
+   },
+   {
+    "label": "Australian Dollar",
+    "qname": "eba_CU:AUD"
+   },
+   {
+    "label": "Brazilian Real",
+    "qname": "eba_CU:BRL"
+   },
+   {
+    "label": "Bulgarian Lev",
+    "qname": "eba_CU:BGN"
+   },
+   {
+    "label": "Canadian Dollar",
+    "qname": "eba_CU:CAD"
+   },
+   {
+    "label": "Czech Koruna",
+    "qname": "eba_CU:CZK"
+   },
+   {
+    "label": "Danish Krone",
+    "qname": "eba_CU:DKK"
+   },
+   {
+    "label": "Egyptian Pound",
+    "qname": "eba_CU:EGP"
+   },
+   {
+    "label": "Euro",
+    "qname": "eba_CU:EUR"
+   },
+   {
+    "label": "Pound Sterling",
+    "qname": "eba_CU:GBP"
+   },
+   {
+    "label": "Forint",
+    "qname": "eba_CU:HUF"
+   },
+   {
+    "label": "Yen",
+    "qname": "eba_CU:JPY"
+   },
+   {
+    "label": "Latvian Lats",
+    "qname": "eba_CU:LVL"
+   },
+   {
+    "label": "Lithuanian Litas",
+    "qname": "eba_CU:LTL"
+   },
+   {
+    "label": "Denar",
+    "qname": "eba_CU:MKD"
+   },
+   {
+    "label": "Mexican Peso",
+    "qname": "eba_CU:MXN"
+   },
+   {
+    "label": "Zloty",
+    "qname": "eba_CU:PLN"
+   },
+   {
+    "label": "New Romanian Leu",
+    "qname": "eba_CU:RON"
+   },
+   {
+    "label": "Russian Ruble",
+    "qname": "eba_CU:RUB"
+   },
+   {
+    "label": "Serbian Dinar",
+    "qname": "eba_CU:RSD"
+   },
+   {
+    "label": "Swedish Krona",
+    "qname": "eba_CU:SEK"
+   },
+   {
+    "label": "Swiss Franc",
+    "qname": "eba_CU:CHF"
+   },
+   {
+    "label": "Turkish Lira",
+    "qname": "eba_CU:TRY"
+   },
+   {
+    "label": "Hryvnia",
+    "qname": "eba_CU:UAH"
+   },
+   {
+    "label": "US Dollar",
+    "qname": "eba_CU:USD"
+   },
+   {
+    "label": "Iceland Krona",
+    "qname": "eba_CU:ISK"
+   },
+   {
+    "label": "Norwegian Krone",
+    "qname": "eba_CU:NOK"
+   },
+   {
+    "label": "Hong Kong Dollar",
+    "qname": "eba_CU:HKD"
+   },
+   {
+    "label": "New Taiwan Dollar",
+    "qname": "eba_CU:TWD"
+   },
+   {
+    "label": "New Zealand Dollar",
+    "qname": "eba_CU:NZD"
+   },
+   {
+    "label": "Singapore Dollar",
+    "qname": "eba_CU:SGD"
+   },
+   {
+    "label": "Won",
+    "qname": "eba_CU:KRW"
+   },
+   {
+    "label": "Yuan Renminbi",
+    "qname": "eba_CU:CNY"
+   },
+   {
+    "label": "Afghani",
+    "qname": "eba_CU:AFN"
+   },
+   {
+    "label": "Algerian Dinar",
+    "qname": "eba_CU:DZD"
+   },
+   {
+    "label": "Armenian Dram",
+    "qname": "eba_CU:AMD"
+   },
+   {
+    "label": "Aruban Florin",
+    "qname": "eba_CU:AWG"
+   },
+   {
+    "label": "Azerbaijanian Manat",
+    "qname": "eba_CU:AZN"
+   },
+   {
+    "label": "Bahamian Dollar",
+    "qname": "eba_CU:BSD"
+   },
+   {
+    "label": "Bahraini Dinar",
+    "qname": "eba_CU:BHD"
+   },
+   {
+    "label": "Baht",
+    "qname": "eba_CU:THB"
+   },
+   {
+    "label": "Rial Omani",
+    "qname": "eba_CU:OMR"
+   },
+   {
+    "label": "Riel",
+    "qname": "eba_CU:KHR"
+   },
+   {
+    "label": "Rufiyaa",
+    "qname": "eba_CU:MVR"
+   },
+   {
+    "label": "Rupiah",
+    "qname": "eba_CU:IDR"
+   },
+   {
+    "label": "Rwanda Franc",
+    "qname": "eba_CU:RWF"
+   },
+   {
+    "label": "Saint Helena Pound",
+    "qname": "eba_CU:SHP"
+   },
+   {
+    "label": "Saudi Riyal",
+    "qname": "eba_CU:SAR"
+   },
+   {
+    "label": "Seychelles Rupee",
+    "qname": "eba_CU:SCR"
+   },
+   {
+    "label": "Solomon Islands Dollar",
+    "qname": "eba_CU:SBD"
+   },
+   {
+    "label": "Som",
+    "qname": "eba_CU:KGS"
+   },
+   {
+    "label": "Somali Shilling",
+    "qname": "eba_CU:SOS"
+   },
+   {
+    "label": "Somoni",
+    "qname": "eba_CU:TJS"
+   },
+   {
+    "label": "South Sudanese Pound",
+    "qname": "eba_CU:SSP"
+   },
+   {
+    "label": "Sri Lanka Rupee",
+    "qname": "eba_CU:LKR"
+   },
+   {
+    "label": "Sudanese Pound",
+    "qname": "eba_CU:SDG"
+   },
+   {
+    "label": "Surinam Dollar",
+    "qname": "eba_CU:SRD"
+   },
+   {
+    "label": "Syrian Pound",
+    "qname": "eba_CU:SYP"
+   },
+   {
+    "label": "Taka",
+    "qname": "eba_CU:BDT"
+   },
+   {
+    "label": "Tala",
+    "qname": "eba_CU:WST"
+   },
+   {
+    "label": "Tanzanian Shilling",
+    "qname": "eba_CU:TZS"
+   },
+   {
+    "label": "Tenge",
+    "qname": "eba_CU:KZT"
+   },
+   {
+    "label": "Trinidad and Tobago Dollar",
+    "qname": "eba_CU:TTD"
+   },
+   {
+    "label": "Tugrik",
+    "qname": "eba_CU:MNT"
+   },
+   {
+    "label": "Tunisian Dinar",
+    "qname": "eba_CU:TND"
+   },
+   {
+    "label": "Turkmenistan New Manat",
+    "qname": "eba_CU:TMT"
+   },
+   {
+    "label": "UAE Dirham",
+    "qname": "eba_CU:AED"
+   },
+   {
+    "label": "Uganda Shilling",
+    "qname": "eba_CU:UGX"
+   },
+   {
+    "label": "Unidad de Valor Real",
+    "qname": "eba_CU:COU"
+   },
+   {
+    "label": "Unidades de fomento",
+    "qname": "eba_CU:CLF"
+   },
+   {
+    "label": "Uruguay Peso en Unidades Indexadas (URUIURUI)",
+    "qname": "eba_CU:UYI"
+   },
+   {
+    "label": "Uzbekistan Sum",
+    "qname": "eba_CU:UZS"
+   },
+   {
+    "label": "Vatu",
+    "qname": "eba_CU:VUV"
+   },
+   {
+    "label": "WIR Euro",
+    "qname": "eba_CU:CHE"
+   },
+   {
+    "label": "WIR Franc",
+    "qname": "eba_CU:CHW"
+   },
+   {
+    "label": "Yemeni Rial",
+    "qname": "eba_CU:YER"
+   },
+   {
+    "label": "Zambian Kwacha (replaced January 1, 2013)",
+    "qname": "eba_CU:ZMK"
+   },
+   {
+    "label": "Zimbabwe Dollar",
+    "qname": "eba_CU:ZWL"
+   },
+   {
+    "label": "Other Currency (open axis tables)",
+    "qname": "eba_CU:x46"
+   },
+   {
+    "label": "Belarusian Ruble",
+    "qname": "eba_CU:BYN"
+   },
+   {
+    "label": "Zambian Kwacha",
+    "qname": "eba_CU:ZMW"
+   },
+   {
+    "label": "Off-shore Yuan Renminbi",
+    "qname": "eba_CU:CNH"
+   },
+   {
+    "label": "Kenyan Shilling",
+    "qname": "eba_CU:KES"
+   },
+   {
+    "label": "Kina",
+    "qname": "eba_CU:PGK"
+   },
+   {
+    "label": "Kip",
+    "qname": "eba_CU:LAK"
+   },
+   {
+    "label": "Kuwaiti Dinar",
+    "qname": "eba_CU:KWD"
+   },
+   {
+    "label": "Kwacha",
+    "qname": "eba_CU:MWK"
+   },
+   {
+    "label": "Kwanza",
+    "qname": "eba_CU:AOA"
+   },
+   {
+    "label": "Kyat",
+    "qname": "eba_CU:MMK"
+   },
+   {
+    "label": "Lari",
+    "qname": "eba_CU:GEL"
+   },
+   {
+    "label": "Lebanese Pound",
+    "qname": "eba_CU:LBP"
+   },
+   {
+    "label": "Lempira",
+    "qname": "eba_CU:HNL"
+   },
+   {
+    "label": "Leone",
+    "qname": "eba_CU:SLL"
+   },
+   {
+    "label": "Liberian Dollar",
+    "qname": "eba_CU:LRD"
+   },
+   {
+    "label": "Libyan Dinar",
+    "qname": "eba_CU:LYD"
+   },
+   {
+    "label": "Lilangeni",
+    "qname": "eba_CU:SZL"
+   },
+   {
+    "label": "Loti",
+    "qname": "eba_CU:LSL"
+   },
+   {
+    "label": "Malagasy Ariary",
+    "qname": "eba_CU:MGA"
+   },
+   {
+    "label": "Malaysian Ringgit",
+    "qname": "eba_CU:MYR"
+   },
+   {
+    "label": "Mauritius Rupee",
+    "qname": "eba_CU:MUR"
+   },
+   {
+    "label": "Moldovan Leu",
+    "qname": "eba_CU:MDL"
+   },
+   {
+    "label": "Moroccan Dirham",
+    "qname": "eba_CU:MAD"
+   },
+   {
+    "label": "Mozambique Metical",
+    "qname": "eba_CU:MZN"
+   },
+   {
+    "label": "Mvdol",
+    "qname": "eba_CU:BOV"
+   },
+   {
+    "label": "Naira",
+    "qname": "eba_CU:NGN"
+   },
+   {
+    "label": "Nakfa",
+    "qname": "eba_CU:ERN"
+   },
+   {
+    "label": "Namibia Dollar",
+    "qname": "eba_CU:NAD"
+   },
+   {
+    "label": "Nepalese Rupee",
+    "qname": "eba_CU:NPR"
+   },
+   {
+    "label": "Netherlands Antillean Guilder",
+    "qname": "eba_CU:ANG"
+   },
+   {
+    "label": "New Israeli Sheqel",
+    "qname": "eba_CU:ILS"
+   },
+   {
+    "label": "Ngultrum",
+    "qname": "eba_CU:BTN"
+   },
+   {
+    "label": "North Korean Won",
+    "qname": "eba_CU:KPW"
+   },
+   {
+    "label": "Nuevo Sol",
+    "qname": "eba_CU:PEN"
+   },
+   {
+    "label": "Ouguiya",
+    "qname": "eba_CU:MRO"
+   },
+   {
+    "label": "Pa’anga",
+    "qname": "eba_CU:TOP"
+   },
+   {
+    "label": "Pakistan Rupee",
+    "qname": "eba_CU:PKR"
+   },
+   {
+    "label": "Pataca",
+    "qname": "eba_CU:MOP"
+   },
+   {
+    "label": "Peso Convertible",
+    "qname": "eba_CU:CUC"
+   },
+   {
+    "label": "Peso Uruguayo",
+    "qname": "eba_CU:UYU"
+   },
+   {
+    "label": "Philippine Peso",
+    "qname": "eba_CU:PHP"
+   },
+   {
+    "label": "Pula",
+    "qname": "eba_CU:BWP"
+   },
+   {
+    "label": "Qatari Rial",
+    "qname": "eba_CU:QAR"
+   },
+   {
+    "label": "Quetzal",
+    "qname": "eba_CU:GTQ"
+   },
+   {
+    "label": "Rand",
+    "qname": "eba_CU:ZAR"
+   },
+   {
+    "label": "Croatian Kuna",
+    "qname": "eba_CU:HRK"
+   }
+  ]
+ },
+ "data_sensitiveness": {
+  "source": "B0202.LISTB02020170",
+  "values": [
+   {
+    "label": "Low",
+    "qname": "eba_ZZ:x791"
+   },
+   {
+    "label": "Medium",
+    "qname": "eba_ZZ:x792"
+   },
+   {
+    "label": "High",
+    "qname": "eba_ZZ:x793"
+   }
+  ]
+ },
+ "entity_type": {
+  "source": "B0101.LIST0101040",
+  "values": [
+   {
+    "label": "issuers of asset-referenced tokens",
+    "qname": "eba_CT:x310"
+   },
+   {
+    "label": "other financial entity",
+    "qname": "eba_CT:x316"
+   },
+   {
+    "label": "securitisation repository",
+    "qname": "eba_CT:x315"
+   },
+   {
+    "label": "crowdfunding service providers",
+    "qname": "eba_CT:x314"
+   },
+   {
+    "label": "administrator of critical benchmarks",
+    "qname": "eba_CT:x313"
+   },
+   {
+    "label": "credit rating agency",
+    "qname": "eba_CT:x312"
+   },
+   {
+    "label": "institutions for occupational retirement provision",
+    "qname": "eba_CT:x311"
+   },
+   {
+    "label": "insurance intermediaries, reinsurance intermediaries and ancillary insurance intermediaries",
+    "qname": "eba_CT:x320"
+   },
+   {
+    "label": "insurance and reinsurance undertakings",
+    "qname": "eba_CT:x309"
+   },
+   {
+    "label": "data reporting service providers",
+    "qname": "eba_CT:x308"
+   },
+   {
+    "label": "managers of alternative investment funds",
+    "qname": "eba_CT:x307"
+   },
+   {
+    "label": "payment institution",
+    "qname": "eba_CT:x300"
+   },
+   {
+    "label": "trade repositories",
+    "qname": "eba_CT:x306"
+   },
+   {
+    "label": "trading venues",
+    "qname": "eba_CT:x305"
+   },
+   {
+    "label": "central security depository",
+    "qname": "eba_CT:x304"
+   },
+   {
+    "label": "crypto-asset service providers",
+    "qname": "eba_CT:x303"
+   },
+   {
+    "label": "electronic money institutions",
+    "qname": "eba_CT:x302"
+   },
+   {
+    "label": "account information service providers",
+    "qname": "eba_CT:x301"
+   },
+   {
+    "label": "Central counterparties (CCPs)",
+    "qname": "eba_CT:x643"
+   },
+   {
+    "label": "Asset management companies",
+    "qname": "eba_CT:x639"
+   },
+   {
+    "label": "Investment firms",
+    "qname": "eba_CT:x599"
+   },
+   {
+    "label": "Credit institutions",
+    "qname": "eba_CT:x12"
+   }
+  ]
+ },
+ "entity_type_b0102": {
+  "source": "B0102.LIST0102040",
+  "values": [
+   {
+    "label": "issuers of asset-referenced tokens",
+    "qname": "eba_CT:x310"
+   },
+   {
+    "label": "other financial entity",
+    "qname": "eba_CT:x316"
+   },
+   {
+    "label": "securitisation repository",
+    "qname": "eba_CT:x315"
+   },
+   {
+    "label": "crowdfunding service providers",
+    "qname": "eba_CT:x314"
+   },
+   {
+    "label": "administrator of critical benchmarks",
+    "qname": "eba_CT:x313"
+   },
+   {
+    "label": "credit rating agency",
+    "qname": "eba_CT:x312"
+   },
+   {
+    "label": "institutions for occupational retirement provision",
+    "qname": "eba_CT:x311"
+   },
+   {
+    "label": "insurance intermediaries, reinsurance intermediaries and ancillary insurance intermediaries",
+    "qname": "eba_CT:x320"
+   },
+   {
+    "label": "insurance and reinsurance undertakings",
+    "qname": "eba_CT:x309"
+   },
+   {
+    "label": "data reporting service providers",
+    "qname": "eba_CT:x308"
+   },
+   {
+    "label": "managers of alternative investment funds",
+    "qname": "eba_CT:x307"
+   },
+   {
+    "label": "payment institution",
+    "qname": "eba_CT:x300"
+   },
+   {
+    "label": "trade repositories",
+    "qname": "eba_CT:x306"
+   },
+   {
+    "label": "trading venues",
+    "qname": "eba_CT:x305"
+   },
+   {
+    "label": "central security depository",
+    "qname": "eba_CT:x304"
+   },
+   {
+    "label": "crypto-asset service providers",
+    "qname": "eba_CT:x303"
+   },
+   {
+    "label": "electronic money institutions",
+    "qname": "eba_CT:x302"
+   },
+   {
+    "label": "account information service providers",
+    "qname": "eba_CT:x301"
+   },
+   {
+    "label": "Central counterparties (CCPs)",
+    "qname": "eba_CT:x643"
+   },
+   {
+    "label": "Asset management companies",
+    "qname": "eba_CT:x639"
+   },
+   {
+    "label": "Investment firms",
+    "qname": "eba_CT:x599"
+   },
+   {
+    "label": "Credit institutions",
+    "qname": "eba_CT:x12"
+   },
+   {
+    "label": "Non-financial entity: Other than ICT intra-group service provider",
+    "qname": "eba_CT:x318"
+   },
+   {
+    "label": "Non-financial entity: ICT intra-group service provider",
+    "qname": "eba_CT:x317"
+   }
+  ]
+ },
+ "hierarchy": {
+  "source": "B0102.LIST01020050",
+  "values": [
+   {
+    "label": "Entities other than entities of the group",
+    "qname": "eba_RP:x21"
+   },
+   {
+    "label": "Ultimate parent",
+    "qname": "eba_RP:x53"
+   },
+   {
+    "label": "Subsidiary",
+    "qname": "eba_RP:x56"
+   },
+   {
+    "label": "Parent other than ultimate parent",
+    "qname": "eba_RP:x551"
+   },
+   {
+    "label": "Outsourcing",
+    "qname": "eba_RP:x210"
+   }
+  ]
+ },
+ "ict_service_type": {
+  "source": "B0202.LISTSERVICE",
+  "values": [
+   {
+    "label": "Cloud services: SaaS",
+    "qname": "eba_TA:S19"
+   },
+   {
+    "label": "Cloud services: PaaS",
+    "qname": "eba_TA:S18"
+   },
+   {
+    "label": "Cloud services: IaaS",
+    "qname": "eba_TA:S17"
+   },
+   {
+    "label": "ICT Risk management",
+    "qname": "eba_TA:S16"
+   },
+   {
+    "label": "ICT Consulting",
+    "qname": "eba_TA:S15"
+   },
+   {
+    "label": "ICT operation management (including maintenance)",
+    "qname": "eba_TA:S14"
+   },
+   {
+    "label": "Software licencing (excluding SaaS)",
+    "qname": "eba_TA:S13"
+   },
+   {
+    "label": "Hardware and physical devices",
+    "qname": "eba_TA:S12"
+   },
+   {
+    "label": "Network infrastructure",
+    "qname": "eba_TA:S11"
+   },
+   {
+    "label": "Telecom carrier",
+    "qname": "eba_TA:S10"
+   },
+   {
+    "label": "Non-Cloud Data storage",
+    "qname": "eba_TA:S09"
+   },
+   {
+    "label": "Computation",
+    "qname": "eba_TA:S08"
+   },
+   {
+    "label": "ICT, facilities and hosting services (excluding Cloud services)",
+    "qname": "eba_TA:S07"
+   },
+   {
+    "label": "Data analysis",
+    "qname": "eba_TA:S06"
+   },
+   {
+    "label": "Provision of data",
+    "qname": "eba_TA:S05"
+   },
+   {
+    "label": "ICT security management services",
+    "qname": "eba_TA:S04"
+   },
+   {
+    "label": "ICT help desk and first level support",
+    "qname": "eba_TA:S03"
+   },
+   {
+    "label": "ICT Development",
+    "qname": "eba_TA:S02"
+   },
+   {
+    "label": "ICT project management",
+    "qname": "eba_TA:S01"
+   }
+  ]
+ },
+ "identifier_type": {
+  "source": "B0202.LISTIDTYPE",
+  "values": [
+   {
+    "label": "Legal Entity Identfier (LEI)",
+    "qname": "eba_qCO:qx2000"
+   },
+   {
+    "label": "National code",
+    "qname": "eba_qCO:qx2001"
+   },
+   {
+    "label": "European Unified ID (EUID)",
+    "qname": "eba_qCO:qx2002"
+   },
+   {
+    "label": "Company registration number (CRN)",
+    "qname": "eba_qCO:qx2003"
+   },
+   {
+    "label": "Value added tax identification number (VAT)",
+    "qname": "eba_qCO:qx2004"
+   },
+   {
+    "label": "Passport Number",
+    "qname": "eba_qCO:qx2005"
+   }
+  ]
+ },
+ "impact_of_discontinuing": {
+  "source": "B0701.LISTB07010100",
+  "values": [
+   {
+    "label": "Low",
+    "qname": "eba_ZZ:x791"
+   },
+   {
+    "label": "Medium",
+    "qname": "eba_ZZ:x792"
+   },
+   {
+    "label": "High",
+    "qname": "eba_ZZ:x793"
+   },
+   {
+    "label": "Assessment not performed",
+    "qname": "eba_ZZ:x799"
+   }
+  ]
+ },
+ "level_of_reliance": {
+  "source": "B0202.LISTB02020180",
+  "values": [
+   {
+    "label": "Not significant",
+    "qname": "eba_ZZ:x794"
+   },
+   {
+    "label": "Low reliance",
+    "qname": "eba_ZZ:x795"
+   },
+   {
+    "label": "Material reliance",
+    "qname": "eba_ZZ:x796"
+   },
+   {
+    "label": "Full reliance",
+    "qname": "eba_ZZ:x797"
+   }
+  ]
+ },
+ "licenced_activity": {
+  "source": "B0601.LISTB06010020",
+  "values": [
+   {
+    "label": "Portfolio management on crypto-assets",
+    "qname": "eba_TA:x182"
+   },
+   {
+    "label": "management of portfolios of investments (AIFMD)",
+    "qname": "eba_TA:x183"
+   },
+   {
+    "label": "management of portfolios of investments (UCITSD)",
+    "qname": "eba_TA:x184"
+   },
+   {
+    "label": "Non-Life Insurance: Classes 1 and 2: ‘Accident and Health Insurance’",
+    "qname": "eba_TA:x185"
+   },
+   {
+    "label": "Non-Life Insurance: Classes 1 (fourth indent), 3, 7 and 10: ‘Motor Insurance’",
+    "qname": "eba_TA:x186"
+   },
+   {
+    "label": "Non-Life Insurance: Classes 1 (fourth indent), 4, 6, 7 and 12: ‘Marine and Transport Insurance’",
+    "qname": "eba_TA:x187"
+   },
+   {
+    "label": "Non-Life Insurance: Classes 1 (fourth indent), 5, 7 and 11: ‘Aviation Insurance’",
+    "qname": "eba_TA:x188"
+   },
+   {
+    "label": "Non-Life Insurance: Classes 8 and 9: ‘Insurance against Fire and other Damage to Property’",
+    "qname": "eba_TA:x189"
+   },
+   {
+    "label": "Non-Life Insurance: Classes 10, 11, 12 and 13: ‘Liability Insurance’",
+    "qname": "eba_TA:x190"
+   },
+   {
+    "label": "Non-Life Insurance: Classes 14 and 15: ‘Credit and Suretyship Insurance’",
+    "qname": "eba_TA:x191"
+   },
+   {
+    "label": "Non-Life Insurance: All classes, at the choice of the Member States, which shall notify the other Member States and the Commission of their choice",
+    "qname": "eba_TA:x192"
+   },
+   {
+    "label": "Life Insurance: The life insurance referred to in points (a)(i), (ii) and (iii) of Article 2(3) excluding those referred to in II and III",
+    "qname": "eba_TA:x193"
+   },
+   {
+    "label": "Life Insurance: Marriage assurance, birth assurance",
+    "qname": "eba_TA:x194"
+   },
+   {
+    "label": "Life Insurance: The insurance referred to in points (a)(i) and (ii) of Article 2(3), which are linked to investment funds",
+    "qname": "eba_TA:x195"
+   },
+   {
+    "label": "Life Insurance: Permanent health insurance, referred to in point (a)(iv) of Article 2(3)",
+    "qname": "eba_TA:x196"
+   },
+   {
+    "label": "Life Insurance: Tontines, referred to in point (b)(i) of Article 2(3)",
+    "qname": "eba_TA:x197"
+   },
+   {
+    "label": "Life Insurance: Capital redemption operations, referred to in point (b)(ii) of Article 2(3)",
+    "qname": "eba_TA:x198"
+   },
+   {
+    "label": "Life Insurance: Management of group pension funds, referred to in point (b)(iii) and (iv) of Article 2(3)",
+    "qname": "eba_TA:x199"
+   },
+   {
+    "label": "Life Insurance: The operations referred to in point (b)(v) of Article 2(3)",
+    "qname": "eba_TA:x200"
+   },
+   {
+    "label": "Life Insurance: The operations referred to in Article 2(3)(c)",
+    "qname": "eba_TA:x201"
+   },
+   {
+    "label": "insurance distribution",
+    "qname": "eba_TA:x202"
+   },
+   {
+    "label": "reinsurance distribution",
+    "qname": "eba_TA:x203"
+   },
+   {
+    "label": "Investment services related to the underlying of the derivatives",
+    "qname": "eba_TA:x204"
+   },
+   {
+    "label": "Retirement-benefit related operations and activities arising therefrom",
+    "qname": "eba_TA:x205"
+   },
+   {
+    "label": "issuance of credit ratings",
+    "qname": "eba_TA:x206"
+   },
+   {
+    "label": "administering the arrangements for determining a benchmark",
+    "qname": "eba_TA:x207"
+   },
+   {
+    "label": "collecting, analysing or processing input data for the purpose of determining a benchmark",
+    "qname": "eba_TA:x208"
+   },
+   {
+    "label": "determining a benchmark through the application of a formula or other method of calculation or by an assessment of input data provided for that purpose",
+    "qname": "eba_TA:x209"
+   },
+   {
+    "label": "publication of benchmark",
+    "qname": "eba_TA:x210"
+   },
+   {
+    "label": "Provision of crowdfunding services",
+    "qname": "eba_TA:x211"
+   },
+   {
+    "label": "ancillary non-securitisation services",
+    "qname": "eba_TA:x212"
+   },
+   {
+    "label": "ancillary securitisation services",
+    "qname": "eba_TA:x213"
+   },
+   {
+    "label": "reception and transmission of orders for crypto-assets on behalf of clients",
+    "qname": "eba_TA:x181"
+   },
+   {
+    "label": "Issuing electronic money",
+    "qname": "eba_TA:x180"
+   },
+   {
+    "label": "Credit reference services",
+    "qname": "eba_TA:x179"
+   },
+   {
+    "label": "Safe custody services",
+    "qname": "eba_TA:x178"
+   },
+   {
+    "label": "non-core services (safekeeping and administration in relation to units of collective investment undertakings)",
+    "qname": "eba_TA:x177"
+   },
+   {
+    "label": "safe-keeping and administration in relation to shares or units of collective investment undertakings",
+    "qname": "eba_TA:x176"
+   },
+   {
+    "label": "Safekeeping and administration of financial instruments for the account of clients",
+    "qname": "eba_TA:x175"
+   },
+   {
+    "label": "Safekeeping and administration of securities",
+    "qname": "eba_TA:x174"
+   },
+   {
+    "label": "Dealing on own account",
+    "qname": "eba_TA:x173"
+   },
+   {
+    "label": "Portfolio management and advice",
+    "qname": "eba_TA:x172"
+   },
+   {
+    "label": "Money broking",
+    "qname": "eba_TA:x171"
+   },
+   {
+    "label": "Advisory services",
+    "qname": "eba_TA:x170"
+   },
+   {
+    "label": "Participation in securities issues and the provision of services relating to such issues",
+    "qname": "eba_TA:x169"
+   },
+   {
+    "label": "Trading for own account or for account of customers",
+    "qname": "eba_TA:x168"
+   },
+   {
+    "label": "Guarantees and commitments related to securities lending and borrowing, within the meaning of point 6 of Annex I to Directive 2013/36/EU",
+    "qname": "eba_TA:x167"
+   },
+   {
+    "label": "Guarantees and commitments",
+    "qname": "eba_TA:x166"
+   },
+   {
+    "label": "Issuing and administering other means of payment",
+    "qname": "eba_TA:x165"
+   },
+   {
+    "label": "Financial leasing",
+    "qname": "eba_TA:x164"
+   },
+   {
+    "label": "Lending activities",
+    "qname": "eba_TA:x163"
+   },
+   {
+    "label": "Taking deposits and other repayable funds",
+    "qname": "eba_TA:x162"
+   },
+   {
+    "label": "Services related to underwriting",
+    "qname": "eba_TA:x147"
+   },
+   {
+    "label": "Investment research and financial analysis",
+    "qname": "eba_TA:x146"
+   },
+   {
+    "label": "Advice to undertakings on capital structure, industrial strategy and related matters and advice and services relating to mergers and the purchase of undertakings",
+    "qname": "eba_TA:x144"
+   },
+   {
+    "label": "Granting credits or loans to investors",
+    "qname": "eba_TA:x143"
+   },
+   {
+    "label": "Operation of an OTF",
+    "qname": "eba_TA:x141"
+   },
+   {
+    "label": "Operation of an MTF",
+    "qname": "eba_TA:x140"
+   },
+   {
+    "label": "Placing of financial instruments without a firm commitment basis",
+    "qname": "eba_TA:x139"
+   },
+   {
+    "label": "Underwriting of financial instruments and/or placing of financial instruments on a firm commitment basis",
+    "qname": "eba_TA:x138"
+   },
+   {
+    "label": "Investment advice",
+    "qname": "eba_TA:x137"
+   },
+   {
+    "label": "Portfolio management",
+    "qname": "eba_TA:x136"
+   },
+   {
+    "label": "Execution of orders on behalf of clients",
+    "qname": "eba_TA:x134"
+   },
+   {
+    "label": "Reception and transmission of orders",
+    "qname": "eba_TA:x133"
+   },
+   {
+    "label": "Foreign exchange services",
+    "qname": "eba_TA:x104"
+   },
+   {
+    "label": "Life-reinsurance activities",
+    "qname": "eba_TA:qx278"
+   },
+   {
+    "label": "Non-life reinsurance activities",
+    "qname": "eba_TA:qx277"
+   },
+   {
+    "label": "supporting function",
+    "qname": "eba_TA:x276"
+   },
+   {
+    "label": "Ancillary services",
+    "qname": "eba_TA:x275"
+   },
+   {
+    "label": "investment advice concerning one or more of the instruments listed in Annex I, Section C to Directive 2004/39/EC",
+    "qname": "eba_TA:x274"
+   },
+   {
+    "label": "services necessary to meet the fiduciary duties of the AIFM",
+    "qname": "eba_TA:x273"
+   },
+   {
+    "label": "Marketing",
+    "qname": "eba_TA:x272"
+   },
+   {
+    "label": "record keeping",
+    "qname": "eba_TA:x271"
+   },
+   {
+    "label": "contract settlements (including certificate dispatch)",
+    "qname": "eba_TA:x269"
+   },
+   {
+    "label": "distribution of income",
+    "qname": "eba_TA:x270"
+   },
+   {
+    "label": "unit issues and redemptions",
+    "qname": "eba_TA:x268"
+   },
+   {
+    "label": "maintenance of unit-holder register",
+    "qname": "eba_TA:x267"
+   },
+   {
+    "label": "unit/shares issues and redemptions",
+    "qname": "eba_TA:x266"
+   },
+   {
+    "label": "maintenance of unit-/shareholder register",
+    "qname": "eba_TA:x265"
+   },
+   {
+    "label": "regulatory compliance monitoring",
+    "qname": "eba_TA:x264"
+   },
+   {
+    "label": "valuation and pricing, including tax returns",
+    "qname": "eba_TA:x263"
+   },
+   {
+    "label": "customer inquiries",
+    "qname": "eba_TA:x262"
+   },
+   {
+    "label": "legal and fund management accounting services",
+    "qname": "eba_TA:x261"
+   },
+   {
+    "label": "risk management",
+    "qname": "eba_TA:x260"
+   },
+   {
+    "label": "interposition between counterparties",
+    "qname": "eba_TA:x259"
+   },
+   {
+    "label": "Any other NCA-permitted Banking-type ancillary services not specified in Annex of Regulation (EU) No 909/2014 (CSDR) - Section C",
+    "qname": "eba_TA:x258"
+   },
+   {
+    "label": "Any other NCA-permitted non-banking-type ancillary services not specified in Annex of Regulation (EU) No 909/2014 (CSDR) - Section B",
+    "qname": "eba_TA:x257"
+   },
+   {
+    "label": "Treasury activities involving foreign exchange and transferable securities related to managing participants’ long balances",
+    "qname": "eba_TA:x256"
+   },
+   {
+    "label": "\" Payment services involving processing of cash and foreign exchange transactions, within the meaning of point 4 of Annex I to Directive 2013/36/EU\"",
+    "qname": "eba_TA:x255"
+   },
+   {
+    "label": "\"Providing cash credit for reimbursement no later than the following business day, cash lending to pre-finance corporate actions and lending securities to holders of securities accounts, within the meaning of point 2 of Annex I to Directive 2013/36/EU\"",
+    "qname": "eba_TA:x254"
+   },
+   {
+    "label": "\"Providing cash accounts to, and accepting deposits from, participants in a securities settlement system and holders of securities accounts, within the meaning of point 1 of Annex I to Directive 2013/36/EU\"",
+    "qname": "eba_TA:x253"
+   },
+   {
+    "label": "Providing IT services",
+    "qname": "eba_TA:x252"
+   },
+   {
+    "label": "\"Providing information, data and statistics to market/census bureaus or other governmental or inter-governmental entities\"",
+    "qname": "eba_TA:x251"
+   },
+   {
+    "label": "Providing regulatory reporting",
+    "qname": "eba_TA:x250"
+   },
+   {
+    "label": "Instruction routing and processing, fee collection and processing and related reporting",
+    "qname": "eba_TA:x249"
+   },
+   {
+    "label": "New issue services, including allocation and management of ISIN codes and similar codes",
+    "qname": "eba_TA:x248"
+   },
+   {
+    "label": "Supporting the processing of corporate actions, including tax, general meetings and information services",
+    "qname": "eba_TA:x247"
+   },
+   {
+    "label": "Services related to shareholders’ registers",
+    "qname": "eba_TA:x246"
+   },
+   {
+    "label": "Settlement matching, instruction routing, trade confirmation, trade verification",
+    "qname": "eba_TA:x245"
+   },
+   {
+    "label": "Establishing CSD links, providing, maintaining or operating securities accounts in relation to the settlement service, collateral management, other ancillary services",
+    "qname": "eba_TA:x244"
+   },
+   {
+    "label": "general collateral management services",
+    "qname": "eba_TA:x243"
+   },
+   {
+    "label": "collateral management services",
+    "qname": "eba_TA:x242"
+   },
+   {
+    "label": "Organising a securities lending mechanism, as agent among participants of a securities settlement system",
+    "qname": "eba_TA:x241"
+   },
+   {
+    "label": "settlement service",
+    "qname": "eba_TA:x240"
+   },
+   {
+    "label": "central maintenance service",
+    "qname": "eba_TA:x239"
+   },
+   {
+    "label": "notary service",
+    "qname": "eba_TA:x238"
+   },
+   {
+    "label": "issuance of asset-referenced tokens",
+    "qname": "eba_TA:x237"
+   },
+   {
+    "label": "providing transfer services for crypto-assets on behalf of clients",
+    "qname": "eba_TA:x236"
+   },
+   {
+    "label": "providing advice on crypto-assets",
+    "qname": "eba_TA:x235"
+   },
+   {
+    "label": "placing of crypto-assets",
+    "qname": "eba_TA:x234"
+   },
+   {
+    "label": "execution of orders for crypto-assets on behalf of clients",
+    "qname": "eba_TA:x233"
+   },
+   {
+    "label": "exchange of crypto-assets for other crypto-assets",
+    "qname": "eba_TA:x232"
+   },
+   {
+    "label": "exchange of crypto-assets for funds",
+    "qname": "eba_TA:x231"
+   },
+   {
+    "label": "Operation of a Regulated Market",
+    "qname": "eba_TA:x230"
+   },
+   {
+    "label": "operation of a trading platform for crypto-assets",
+    "qname": "eba_TA:x229"
+   },
+   {
+    "label": "Providing custody and administration of crypto-assets on behalf of clients",
+    "qname": "eba_TA:x228"
+   },
+   {
+    "label": "Account information services",
+    "qname": "eba_TA:x227"
+   },
+   {
+    "label": "Payment initiation services",
+    "qname": "eba_TA:x226"
+   },
+   {
+    "label": "Money remittance",
+    "qname": "eba_TA:x225"
+   },
+   {
+    "label": "Issuing of payment instruments and/or acquiring of payment transactions",
+    "qname": "eba_TA:x224"
+   },
+   {
+    "label": "Execution of payment transactions where the funds are covered by a credit line for a payment service user",
+    "qname": "eba_TA:x223"
+   },
+   {
+    "label": "Execution of payment transactions, including transfers of funds on a payment account with the user’s payment service provider or with another payment service provider",
+    "qname": "eba_TA:x222"
+   },
+   {
+    "label": "Services enabling cash withdrawals from a payment account as well as all the operations required for operating a payment account",
+    "qname": "eba_TA:x221"
+   },
+   {
+    "label": "Services enabling cash to be placed on a payment account as well as all the operations required for operating a payment account",
+    "qname": "eba_TA:x220"
+   },
+   {
+    "label": "activity as approved reporting mechanism",
+    "qname": "eba_TA:x219"
+   },
+   {
+    "label": "activity as consolidated tape provider",
+    "qname": "eba_TA:x218"
+   },
+   {
+    "label": "activity as approved publication arrangement",
+    "qname": "eba_TA:x217"
+   },
+   {
+    "label": "collection and maintenance of the records of securitisations",
+    "qname": "eba_TA:x216"
+   },
+   {
+    "label": "collection and maintenance of the records of SFTs",
+    "qname": "eba_TA:x215"
+   },
+   {
+    "label": "collection and maintenance of the records of derivatives (non-SFTs)",
+    "qname": "eba_TA:x214"
+   },
+   {
+    "label": "Payment services",
+    "qname": "eba_TA:x28"
+   }
+  ]
+ },
+ "nature_of_entity": {
+  "source": "B0401.LISTBB04010030",
+  "values": [
+   {
+    "label": "branch of a financial entity",
+    "qname": "eba_ZZ:x838"
+   },
+   {
+    "label": "not a branch",
+    "qname": "eba_ZZ:x839"
+   }
+  ]
+ },
+ "reason_not_substitutable": {
+  "source": "B0701.LISTB07010060",
+  "values": [
+   {
+    "label": "Lack of real alternatives",
+    "qname": "eba_ZZ:x963"
+   },
+   {
+    "label": "Difficulties in migrating or reintegrating",
+    "qname": "eba_ZZ:x964"
+   },
+   {
+    "label": "Lack of real alternatives and difficulties in migrating or reintegrating",
+    "qname": "eba_ZZ:x965"
+   }
+  ]
+ },
+ "reintegration": {
+  "source": "B0701.LISTB07010090",
+  "values": [
+   {
+    "label": "Easy",
+    "qname": "eba_ZZ:x798"
+   },
+   {
+    "label": "Difficult",
+    "qname": "eba_ZZ:x966"
+   },
+   {
+    "label": "Highly complex",
+    "qname": "eba_ZZ:x967"
+   },
+   {
+    "label": "Not applicable",
+    "qname": "eba_ZZ:x0"
+   }
+  ]
+ },
+ "storage_of_data": {
+  "source": "B0202.LISTB02020140",
+  "values": [
+   {
+    "label": "Yes",
+    "qname": "eba_BT:x28"
+   },
+   {
+    "label": "No",
+    "qname": "eba_BT:x29"
+   }
+  ]
+ },
+ "substitutability": {
+  "source": "B0701.LISTB07010050",
+  "values": [
+   {
+    "label": "Easily substitutable",
+    "qname": "eba_ZZ:x962"
+   },
+   {
+    "label": "Medium complexity in terms of substitutability",
+    "qname": "eba_ZZ:x961"
+   },
+   {
+    "label": "Highly complex substitutability",
+    "qname": "eba_ZZ:x960"
+   },
+   {
+    "label": "Not substitutable",
+    "qname": "eba_ZZ:x959"
+   }
+  ]
+ },
+ "termination_reason": {
+  "source": "B0202.LISTB02020090",
+  "values": [
+   {
+    "label": "Termination not for cause: Expired and not renewd",
+    "qname": "eba_CO:x4"
+   },
+   {
+    "label": "Termination for cause: Provider in breach of applicable law, regulations or contractual provisions",
+    "qname": "eba_CO:x5"
+   },
+   {
+    "label": "Termination for cause: Identified impediments of the provider capable of altering the supported function",
+    "qname": "eba_CO:x6"
+   },
+   {
+    "label": "Termination for cause: provider's weaknesses regarding the management and security of sensitive data or information",
+    "qname": "eba_CO:x7"
+   },
+   {
+    "label": "Termination: as requested by the competent authority",
+    "qname": "eba_CO:x8"
+   },
+   {
+    "label": "Other reasons for termination",
+    "qname": "eba_CO:x9"
+   }
+  ]
+ },
+ "type_of_person": {
+  "source": "B0501.LISTB05010070",
+  "values": [
+   {
+    "label": "Legal person, excluding individual acting in a business capacity",
+    "qname": "eba_CT:x212"
+   },
+   {
+    "label": "Individual acting in a business capacity",
+    "qname": "eba_CT:x213"
+   }
+  ]
+ }
+}

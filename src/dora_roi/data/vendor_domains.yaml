@@ -1,0 +1,97 @@
+# Domain -> Terraform provider key, for vendors a DNS record or a cluster reveals.
+#
+# A DNS zone is a confession. An MX record names who reads your mail, a CNAME
+# names who serves a subdomain, an SPF include names everyone allowed to send as
+# you — and none of it appears in a `required_providers` block. On a real estate
+# the Terraform providers came to one (aws) while the DNS records named eight
+# more, every one of them an ICT third-party service provider in DORA's sense.
+#
+# Matching is on the registrable domain and never a substring: `evil-hubspot.net`
+# is not HubSpot, and `hubspot.net.attacker.example` is not either.
+#
+# The key is the provider name used in provider_mapping.yaml, so a domain found
+# here inherits that vendor's legal name, country and service codes. A key with
+# no entry there still produces a row — unmapped, and visible in the gap report.
+#
+# **Adding a domain is the single most useful contribution to this file.**
+
+# --- hyperscalers and their edges ------------------------------------------
+amazonaws.com: aws
+cloudfront.net: aws
+awsapps.com: aws
+amazonses.com: aws
+azurewebsites.net: azurerm
+azure.com: azurerm
+windows.net: azurerm
+googleapis.com: google
+googlehosted.com: google
+googlemail.com: google
+google.com: google
+gstatic.com: google
+run.app: google
+appspot.com: google
+firebaseapp.com: google
+
+# --- observability, security, identity -------------------------------------
+datadoghq.com: datadog
+datadoghq.eu: datadog
+newrelic.com: newrelic
+sentry.io: sentry
+grafana.net: grafana
+elastic-cloud.com: elastic
+found.io: elastic
+cloudflare.com: cloudflare
+cloudflareaccess.com: cloudflare
+fastly.net: fastly
+okta.com: okta
+oktapreview.com: okta
+auth0.com: auth0
+pagerduty.com: pagerduty
+
+# --- data platforms ---------------------------------------------------------
+snowflakecomputing.com: snowflake
+mongodb.net: mongodbatlas
+confluent.cloud: confluent
+
+# --- source control and delivery -------------------------------------------
+github.com: github
+githubusercontent.com: github
+gitlab.com: gitlab
+vercel.app: vercel
+vercel-dns.com: vercel
+netlify.app: netlify
+netlify.com: netlify
+
+# --- marketing, sales, support, HR ------------------------------------------
+# The category Terraform never sees, and the one most likely to process
+# personal data. Every entry below was found in a real Route53 zone.
+hubspot.net: hubspot
+hubspotemail.net: hubspot
+hs-sites.com: hubspot
+mcsv.net: mailchimp
+mailchimp.com: mailchimp
+list-manage.com: mailchimp
+webflow.com: webflow
+teamtailor.com: teamtailor
+lemlist.com: lemlist
+sendgrid.net: sendgrid
+mailgun.org: mailgun
+zendesk.com: zendesk
+intercom.io: intercom
+salesforce.com: salesforce
+stripe.com: stripe
+atlassian.net: atlassian
+slack.com: slack
+zoom.us: zoom
+notion.so: notion
+typeform.com: typeform
+segment.com: segment
+mixpanel.com: mixpanel
+amplitude.com: amplitude
+
+# --- hosting and infrastructure --------------------------------------------
+digitaloceanspaces.com: digitalocean
+scw.cloud: scaleway
+ovh.net: ovh
+aruba.it: aruba
+arubabusiness.it: aruba

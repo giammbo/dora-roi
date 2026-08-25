@@ -1,0 +1,43 @@
+name: Domain data discrepancy
+description: A field code, count or closed-list value disagrees with the official EBA files.
+title: "domain data: <template>.<code>"
+labels: ["domain-data"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        The field catalog is reconciled against the official EBA files on every commit,
+        but the mandatory flags are not covered by that check and the reconciliation only
+        sees what the vendored files carry. **Where this repository and the EBA files
+        disagree, the EBA files win** — so this is a high-value report.
+
+  - type: input
+    id: field
+    attributes:
+      label: Template and field code
+      placeholder: B_02.02.0150
+    validations:
+      required: true
+
+  - type: textarea
+    id: says
+    attributes:
+      label: What this repository says
+    validations:
+      required: true
+
+  - type: textarea
+    id: official
+    attributes:
+      label: What the official EBA file says
+      description: Quote it, and name the document plus the sheet, page or cell.
+    validations:
+      required: true
+
+  - type: input
+    id: source
+    attributes:
+      label: Source document
+      placeholder: EBA annotated template, DORA 4.0, sheet B_02.02, row 15
+    validations:
+      required: true

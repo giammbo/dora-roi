@@ -1,0 +1,72 @@
+name: Add or correct a provider mapping
+description: Map a Terraform provider to its vendor, country and service codes — the most useful contribution to this project.
+title: "mapping: <terraform provider name>"
+labels: ["mapping"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Every entry makes the tool useful for the next person with that provider in
+        their state. A pull request against `src/dora_roi/data/provider_mapping.yaml`
+        is even better than an issue — see [CONTRIBUTING.md](../blob/main/CONTRIBUTING.md).
+
+  - type: input
+    id: provider
+    attributes:
+      label: Terraform provider name
+      description: Exactly as it appears in state, inside `provider["registry/namespace/NAME"]`.
+      placeholder: snowflake
+    validations:
+      required: true
+
+  - type: input
+    id: vendor
+    attributes:
+      label: Legal name of the contracting entity
+      description: >-
+        The entity an EU customer actually contracts with, not the brand.
+        "Google Cloud EMEA Limited", not "Google".
+      placeholder: Snowflake Computing Netherlands B.V.
+    validations:
+      required: true
+
+  - type: input
+    id: country
+    attributes:
+      label: HQ country
+      description: ISO 3166-1 alpha-2, upper case.
+      placeholder: NL
+    validations:
+      required: true
+
+  - type: input
+    id: services
+    attributes:
+      label: Suggested service codes
+      description: >-
+        From S01-S19. Be conservative: two accurate codes beat five aspirational ones.
+        These are suggestions — classifying a service is always the filing entity's own call.
+      placeholder: S19, S06
+    validations:
+      required: true
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: What could mislead a reader
+      description: >-
+        When is this default wrong? Does self-hosting change the codes? Is there a
+        different entity for US contracts? Who is the ultimate parent after an
+        acquisition? This field is why the mapping is trustworthy.
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: confirm
+    attributes:
+      label: Please confirm
+      options:
+        - label: I have not included an LEI. GLEIF resolves those at scan time.
+          required: true
+        - label: The vendor name is the legal entity, not the brand.
+          required: true

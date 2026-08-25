@@ -1,0 +1,367 @@
+# Terraform provider -> ICT third-party service provider, suggested.
+#
+# ============================ READ THIS FIRST ============================
+# Everything in this file is a SUGGESTION and is emitted as INFERRED, never
+# FILLED. Classifying an ICT service under S01-S19 is the financial entity's
+# own regulatory responsibility (golden rule 4), and so is naming the legal
+# counterparty. This file cannot know either one for your contracts.
+#
+# Two things it gets wrong by construction, and that you are expected to
+# override:
+#
+#   * The contracting entity. `vendor` and `hq_country` name the entity an EU
+#     customer most commonly contracts with, because DORA is EU law. If you
+#     contract with the US parent, or through a reseller, or with a local
+#     subsidiary, the value here is wrong for you.
+#   * The service codes. A provider is listed with the codes its typical use
+#     attracts. Your use may be narrower, wider, or different: one S3 bucket
+#     used purely for archival is not the same service as a full AWS estate.
+#
+# Override with your own YAML and `--mapping vendors-map.yaml`. The merge is
+# per key: give only `hq_country` for a provider and its vendor, services and
+# notes are kept from this file.
+# =========================================================================
+
+aws:
+  vendor: Amazon Web Services EMEA SARL
+  hq_country: LU
+  services: [S17, S18]
+  notes: >-
+    EU customers normally contract with the Luxembourg EMEA entity; US and some
+    public-sector contracts run through Amazon Web Services, Inc. (US). Managed
+    services on top of the estate may additionally be S19, and individual
+    workloads S08 or S09.
+    Checked against GLEIF 2026-08-23: the EMEA SARL entity has NO LEI. B_05.01
+    will need a Luxembourg national code (LU_CRN, the RCS number) from your
+    contract, supplied through the overlay — or the US parent's LEI if that is
+    who you actually contract with. --gleif cannot resolve this one for you.
+
+google:
+  vendor: Google Cloud EMEA Limited
+  hq_country: IE
+  services: [S17, S18]
+  notes: >-
+    Irish EMEA entity for most EU customers; Google Cloud EMEA Limited and
+    Google Ireland Limited are distinct counterparties, check the contract.
+
+azurerm:
+  vendor: Microsoft Ireland Operations Limited
+  hq_country: IE
+  services: [S17, S18]
+  notes: Enterprise agreements are often signed with a local Microsoft entity instead.
+
+azuread:
+  vendor: Microsoft Ireland Operations Limited
+  hq_country: IE
+  services: [S19, S04]
+  notes: Entra ID as identity SaaS; usually part of the same arrangement as azurerm.
+
+datadog:
+  vendor: Datadog, Inc.
+  hq_country: US
+  services: [S19, S06]
+  notes: EU customers may contract with Datadog France SAS or the EU data region entity.
+
+cloudflare:
+  vendor: Cloudflare, Inc.
+  hq_country: US
+  services: [S11, S04]
+  notes: >-
+    CDN and network edge (S11) plus WAF and DDoS protection (S04). Cloudflare
+    Workers and R2 shift the picture toward S18 and S09.
+
+snowflake:
+  vendor: Snowflake Inc.
+  hq_country: US
+  services: [S19, S06]
+  notes: Data platform as SaaS; the deployment region drives location of data at rest.
+
+mongodbatlas:
+  vendor: MongoDB, Inc.
+  hq_country: US
+  services: [S18, S19]
+  notes: Managed database; MongoDB Limited (IE) is the usual EU contracting entity.
+
+github:
+  vendor: GitHub, Inc.
+  hq_country: US
+  services: [S19, S02]
+  notes: Microsoft subsidiary — the ultimate parent for B_05.01.0110 is Microsoft Corporation.
+
+gitlab:
+  vendor: GitLab Inc.
+  hq_country: US
+  services: [S19, S02]
+  notes: Self-managed GitLab is closer to S13 (software licencing) than to S19.
+
+okta:
+  vendor: Okta, Inc.
+  hq_country: US
+  services: [S19, S04]
+  notes: Identity provider; frequently supports a critical or important function.
+
+auth0:
+  vendor: Auth0, Inc.
+  hq_country: US
+  services: [S19, S04]
+  notes: Okta subsidiary since 2021 — ultimate parent is Okta, Inc.
+
+pagerduty:
+  vendor: PagerDuty, Inc.
+  hq_country: US
+  services: [S19, S03]
+  notes: Incident response tooling; S03 applies where it carries first-level support.
+
+fastly:
+  vendor: Fastly, Inc.
+  hq_country: US
+  services: [S11, S19]
+  notes: Edge network and CDN.
+
+newrelic:
+  vendor: New Relic, Inc.
+  hq_country: US
+  services: [S19, S06]
+  notes: Observability SaaS.
+
+confluent:
+  vendor: Confluent, Inc.
+  hq_country: US
+  services: [S18, S19]
+  notes: Managed Kafka; self-managed Confluent Platform is S13.
+
+vault:
+  vendor: HashiCorp, Inc.
+  hq_country: US
+  services: [S04, S13]
+  notes: >-
+    Self-managed Vault is licenced software (S13) with a security-management
+    function (S04); HCP Vault is S19 instead. HashiCorp was acquired by IBM —
+    check the current contracting entity and ultimate parent.
+
+tfe:
+  vendor: HashiCorp, Inc.
+  hq_country: US
+  services: [S19, S02]
+  notes: Terraform Cloud / Enterprise. Same ultimate-parent caveat as vault.
+
+buildkite:
+  vendor: Buildkite Pty Ltd
+  hq_country: AU
+  services: [S19, S02]
+  notes: CI as SaaS with self-hosted agents; the agents are yours, the control plane is not.
+
+elastic:
+  vendor: Elasticsearch B.V.
+  hq_country: NL
+  services: [S19, S06]
+  notes: Elastic Cloud; a self-managed cluster is S13 plus your own hosting.
+
+grafana:
+  vendor: Raintank, Inc.
+  hq_country: US
+  services: [S19, S06]
+  notes: >-
+    Trades as Grafana Labs; the legal name is Raintank, Inc., which is what
+    GLEIF is keyed on. Grafana Cloud; self-hosted Grafana is not a third-party
+    ICT service at all.
+
+sentry:
+  vendor: Functional Software, Inc.
+  hq_country: US
+  services: [S19, S02]
+  notes: >-
+    Trades as Sentry; the legal name is Functional Software, Inc. Error
+    monitoring, and it often processes personal data — check B_02.02.0170.
+
+vercel:
+  vendor: Vercel Inc.
+  hq_country: US
+  services: [S18, S19]
+  notes: Application hosting platform; runs on top of AWS, which matters for B_05.02 rank 2.
+
+digitalocean:
+  vendor: DigitalOcean LLC
+  hq_country: US
+  services: [S17, S18]
+  notes: IaaS with managed services on top.
+
+scaleway:
+  vendor: Scaleway SAS
+  hq_country: FR
+  services: [S17, S18]
+  notes: French IaaS; useful where data residency in the EU is contractual.
+
+ovh:
+  vendor: OVH Groupe SA
+  hq_country: FR
+  services: [S17, S07]
+  notes: IaaS plus bare-metal and colocation, which is facilities and hosting (S07).
+
+# --- Reached through Kubernetes rather than a Terraform provider ------------
+# A registry host is a vendor relationship even when nothing in your state
+# declares one. These have no Terraform provider of the same name; the key is
+# what the k8s collector emits.
+
+docker:
+  vendor: Docker, Inc.
+  hq_country: US
+  services: [S19, S13]
+  notes: >-
+    Docker Hub as an image registry. A free anonymous pull is still a
+    dependency — rate limits and availability affect your deployments — but it
+    may not be a contractual arrangement at all. Check before filing.
+
+quay:
+  vendor: Red Hat, Inc.
+  hq_country: US
+  services: [S19, S13]
+  notes: Quay.io. IBM subsidiary — the ultimate parent for B_05.01.0110 is IBM.
+
+jfrog:
+  vendor: JFrog Ltd
+  hq_country: IL
+  services: [S19, S13]
+  notes: Artifactory as a service; a self-hosted Artifactory is S13 with your own hosting.
+
+# --- Reached through a DNS record, not a Terraform provider ------------------
+# Found by reading a real Route53 zone. None of these appear in any
+# `required_providers` block, and most of them process personal data — which is
+# exactly why a register built from Terraform providers alone is short.
+#
+# The countries and legal names below are the usual EU-facing entity where one
+# is known, and the vendor's own where it is not. Override in your own YAML.
+
+hubspot:
+  vendor: HubSpot Ireland Limited
+  hq_country: IE
+  services: [S19, S06]
+  notes: >-
+    Marketing, sales and CRM. Holds contact and behavioural data on your
+    customers, so B_02.02.0170 (sensitiveness) is rarely "Low". The US parent is
+    HubSpot, Inc.; EU customers usually contract with the Irish entity.
+
+mailchimp:
+  vendor: Intuit Inc.
+  hq_country: US
+  services: [S19, S05]
+  notes: >-
+    Mailchimp, an Intuit company since 2021 — the ultimate parent for
+    B_05.01.0110 is Intuit, not Mailchimp. Sends on your behalf and holds your
+    subscriber list.
+
+webflow:
+  vendor: Webflow, Inc.
+  hq_country: US
+  services: [S19, S18]
+  notes: Website hosting and CMS; usually serves a marketing site, not a critical function.
+
+teamtailor:
+  vendor: Teamtailor AB
+  hq_country: SE
+  services: [S19]
+  notes: Recruitment. Holds candidate data, which is personal data about people who are not customers.
+
+lemlist:
+  vendor: Lempire SAS
+  hq_country: FR
+  services: [S19]
+  notes: Cold email outreach; sends as your domain, so it appears in your SPF.
+
+netlify:
+  vendor: Netlify, Inc.
+  hq_country: US
+  services: [S18, S19]
+  notes: Static hosting and edge functions.
+
+aruba:
+  vendor: Aruba S.p.A.
+  hq_country: IT
+  services: [S19, S07]
+  notes: Italian hosting, mail and certification services; often the legacy mail provider.
+
+sendgrid:
+  vendor: Twilio Inc.
+  hq_country: US
+  services: [S19, S05]
+  notes: SendGrid is Twilio — the ultimate parent for B_05.01.0110 is Twilio Inc.
+
+mailgun:
+  vendor: Sinch AB
+  hq_country: SE
+  services: [S19, S05]
+  notes: Mailgun is part of Sinch; check the contracting entity, which is often Mailgun Technologies, Inc.
+
+zendesk:
+  vendor: Zendesk, Inc.
+  hq_country: US
+  services: [S19, S03]
+  notes: Support desk — S03 applies where it carries your first-level support.
+
+intercom:
+  vendor: Intercom R&D Unlimited Company
+  hq_country: IE
+  services: [S19, S03]
+  notes: In-product messaging and support; the Irish entity is the usual EU counterparty.
+
+salesforce:
+  vendor: Salesforce, Inc.
+  hq_country: US
+  services: [S19, S06]
+  notes: EU customers frequently contract with salesforce.com EMEA Limited (IE) instead.
+
+stripe:
+  vendor: Stripe Payments Europe, Limited
+  hq_country: IE
+  services: [S19]
+  notes: >-
+    Payments. If it is in your critical path it is almost certainly supporting a
+    critical or important function — check B_06.01 rather than assuming.
+
+atlassian:
+  vendor: Atlassian Pty Ltd
+  hq_country: AU
+  services: [S19, S01]
+  notes: Jira and Confluence; S01 where it carries ICT project management.
+
+slack:
+  vendor: Slack Technologies Limited
+  hq_country: IE
+  services: [S19]
+  notes: Salesforce subsidiary — the ultimate parent for B_05.01.0110 is Salesforce, Inc.
+
+zoom:
+  vendor: Zoom Communications, Inc.
+  hq_country: US
+  services: [S19, S10]
+  notes: Zoom Video Communications was renamed in 2025; check the current contracting entity.
+
+notion:
+  vendor: Notion Labs, Inc.
+  hq_country: US
+  services: [S19]
+  notes: Knowledge base; frequently ends up holding operational documentation.
+
+typeform:
+  vendor: TYPEFORM SL
+  hq_country: ES
+  services: [S19, S05]
+  notes: Forms; collects whatever you ask for, which is often personal data.
+
+segment:
+  vendor: Twilio Inc.
+  hq_country: US
+  services: [S19, S06]
+  notes: Segment is Twilio. A customer data platform sees everything by design.
+
+mixpanel:
+  vendor: Mixpanel, Inc.
+  hq_country: US
+  services: [S19, S06]
+  notes: Product analytics.
+
+amplitude:
+  vendor: Amplitude, Inc.
+  hq_country: US
+  services: [S19, S06]
+  notes: Product analytics.

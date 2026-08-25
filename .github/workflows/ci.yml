@@ -1,0 +1,120 @@
+name: CI
+
+# The checks run inside the project's own image, not against a runner-installed
+# Python. One way to build this project, not one for humans and another for CI:
+# if a check passes here it passes on a laptop, and the reverse.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    name: checks (py${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build the check image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: dev
+          build-args: PYTHON_VERSION=${{ matrix.python }}
+          tags: dora-roi-dev:${{ matrix.python }}
+          load: true
+          cache-from: type=gha,scope=dev-${{ matrix.python }}
+          cache-to: type=gha,mode=max,scope=dev-${{ matrix.python }}
+
+      - name: Lint
+        run: docker run --rm dora-roi-dev:${{ matrix.python }} ruff check .
+
+      - name: Format
+        run: docker run --rm dora-roi-dev:${{ matrix.python }} ruff format --check .
+
+      # The floor exists to stop coverage collapsing, not to chase a number:
+      # it sits a few points under the real figure so a legitimate new
+      # lazy-import fallback does not fail the build, and a task landing
+      # without tests does.
+      - name: Tests
+        run: |
+          docker run --rm dora-roi-dev:${{ matrix.python }} \
+            pytest --cov=dora_roi --cov-report=term-missing --cov-fail-under=93
+
+      # The definition of done in CONTRIBUTING.md includes a working smoke run,
+      # so CI checks it rather than trusting that the unit tests imply it.
+      - name: Smoke run on the fixture
+        run: |
+          docker run --rm dora-roi-dev:${{ matrix.python }} \
+            dora-roi providers -s tests/fixtures/sample.tfstate
+          docker run --rm dora-roi-dev:${{ matrix.python }} \
+            dora-roi scan -s tests/fixtures/sample.tfstate -o /tmp/out
+
+  types:
+    name: mypy
+    runs-on: ubuntu-latest
+    # Blocking. This job was meant to start advisory, but it has been clean for
+    # every commit so far, so leaving it advisory would only mean the first
+    # regression goes unnoticed.
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: dev
+          tags: dora-roi-dev:types
+          load: true
+          cache-from: type=gha,scope=dev-3.11
+      - run: docker run --rm dora-roi-dev:types mypy src
+
+  package:
+    name: package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+
+      # The shipped target is a different image from the one the checks run in:
+      # it carries no dev dependencies, so a packaging mistake that the dev
+      # image hides — a missing data file, an unbuildable wheel — fails here.
+      - name: Build the shipped image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: base
+          tags: dora-roi:ci
+          load: true
+          cache-from: type=gha,scope=base
+          cache-to: type=gha,mode=max,scope=base
+
+      - name: The console script works
+        run: |
+          docker run --rm dora-roi:ci --help
+          docker run --rm dora-roi:ci version
+
+      - name: The packaged mapping survived packaging
+        run: |
+          docker run --rm --entrypoint python dora-roi:ci -c \
+            "from dora_roi.enrichment.mapping import load_mapping; assert len(load_mapping()) >= 20"
+
+      - name: The wheel builds
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: dev
+          tags: dora-roi-dev:wheel
+          load: true
+          cache-from: type=gha,scope=dev-3.11
+      - run: docker run --rm dora-roi-dev:wheel uv build --wheel

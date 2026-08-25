@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Is this legal advice?
+    url: https://github.com/giammbo/dora-roi/blob/main/README.md#what-it-does-not-do
+    about: No. dora-roi produces hypotheses and gap analyses, never a compliance claim.

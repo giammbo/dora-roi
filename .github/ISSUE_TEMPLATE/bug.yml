@@ -1,0 +1,63 @@
+name: Bug report
+description: Something crashed, or produced output that is wrong.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ⚠️ **Never attach a real Terraform state file.** State can contain secrets in
+        resource attributes. A redacted excerpt of the one resource that broke it is
+        worth far more than the whole file.
+
+  - type: textarea
+    id: command
+    attributes:
+      label: The command you ran
+      render: shell
+      placeholder: dora-roi scan -s terraform.tfstate -o out/
+    validations:
+      required: true
+
+  - type: textarea
+    id: happened
+    attributes:
+      label: What happened
+      description: Paste the output or traceback.
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected instead
+    validations:
+      required: true
+
+  - type: textarea
+    id: excerpt
+    attributes:
+      label: Redacted state excerpt, if relevant
+      description: Just the resource that triggered it, with values replaced.
+      render: json
+    validations:
+      required: false
+
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Output of `dora-roi version`.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: how
+    attributes:
+      label: How are you running it?
+      options:
+        - Docker (docker compose)
+        - Installed CLI (uv tool / pipx / pip)
+        - From a clone
+    validations:
+      required: true

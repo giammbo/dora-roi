@@ -1,0 +1,58 @@
+# Byte-compiled / cache
+__pycache__/
+*.py[cod]
+*$py.class
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Environments
+.venv/
+venv/
+.env
+.env.*
+
+# Coverage / test artifacts
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# Editors / OS
+.DS_Store
+.idea/
+.vscode/
+
+# The maintainer's working notes: drafting notes, plans, design sketches.
+# Not distributed — the authorities are the vendored EBA files and the README.
+docs/
+
+# dora-roi scan output. out/ and work/ are the compose mount points and must
+# keep existing, or docker creates them as root.
+inventory.json
+roi_prefill.json
+gap-report.md
+gap-report.json
+out/*
+!out/.gitkeep
+work/*
+!work/.gitkeep
+
+# Never commit real infrastructure state or vendor data
+*.tfstate
+*.tfstate.backup
+!tests/fixtures/*.tfstate
+vendors.yaml
+!tests/fixtures/**/vendors.yaml
+
+# Large multi-framework EBA source archives. The DORA files extracted from
+# them are vendored beside PROVENANCE.md; these are not.
+tests/fixtures/eba/sample_documents.zip
+tests/fixtures/eba/annotated_templates.zip
+tests/fixtures/eba/taxo_package_4.0.zip
