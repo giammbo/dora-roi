@@ -42,6 +42,7 @@ __all__ = [
     "DiscoveredAccount",
     "ExpenseReport",
     "OrganizationInventory",
+    "annual_window",
     "collect_annual_expense",
     "collect_organization",
     "expense_for_provider",
@@ -265,6 +266,19 @@ def calling_account(profile: str | None = None) -> str | None:
         return None
 
 
+def annual_window(today: date | None = None) -> tuple[date, date]:
+    """Trailing twelve whole months, ending at the start of the current one.
+
+    Whole months, ending at the start of the current one: a partial month would
+    make an "annual" figure quietly smaller than a year. Shared by every caller
+    that asks Cost Explorer for a year of spend, so this definition of "a year"
+    lives in exactly one place instead of drifting between channels.
+    """
+    end = (today or date.today()).replace(day=1)
+    start = end.replace(year=end.year - 1)
+    return start, end
+
+
 def collect_annual_expense(
     *,
     client: CostExplorerClient | None = None,
@@ -278,8 +292,7 @@ def collect_annual_expense(
     make the register's "annual expense" quietly smaller than a year.
     """
     client = client if client is not None else _ce_client(profile)
-    end = (today or date.today()).replace(day=1)
-    start = end.replace(year=end.year - 1)
+    start, end = annual_window(today)
 
     response = readonly(
         client,
