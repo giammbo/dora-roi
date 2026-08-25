@@ -62,6 +62,7 @@ __all__ = [
     "ClickopsError",
     "ExternalPrincipal",
     "VendorFact",
+    "collect_clickops",
     "collect_identity_providers",
     "collect_marketplace",
     "collect_partner_event_sources",
@@ -720,3 +721,90 @@ def collect_trust_relationships(
                     existing.resource_count += 1
 
     return sorted(found.values(), key=lambda p: p.name), unknown
+
+
+def collect_clickops(
+    *,
+    profile: str | None,
+    role_arn: str | None,
+    account_id: str,
+    own_accounts: frozenset[str],
+    regions: frozenset[str],
+    refused: list[str],
+) -> tuple[list[DiscoveredProvider], list[ExternalPrincipal]]:
+    """Every per-account channel, for one account.
+
+    Marketplace is deliberately not here: Cost Explorer answers for the payer,
+    so it runs once per scan and has its own entry point, :func:`collect_marketplace`.
+    Folding it into a per-account loop would ask the same question once per
+    account and risk summing one bill N times over.
+
+    A bad profile or an unassumable role costs this one account, not the
+    sweep: the caller passes a fresh ``refused`` for every account it visits
+    to accumulate into, and a denial here is appended to it and returned as an
+    empty result rather than raised, the same contract every channel in this
+    module keeps.
+    """
+    try:
+        session = _session(profile=profile, role_arn=role_arn)
+    except (AwsError, ClickopsError) as e:
+        refused.append(f"{account_id}: no usable credentials ({e})")
+        return [], []
+
+    iam = session.client("iam")
+    providers = collect_identity_providers(iam, account_id=account_id, refused=refused)
+    trusted, unknown = collect_trust_relationships(
+        iam, account_id=account_id, own_accounts=own_accounts, refused=refused
+    )
+    providers.extend(trusted)
+
+    for region in sorted(regions):
+        providers.extend(
+            collect_partner_event_sources(
+                session.client("events", region_name=region),
+                account_id=account_id,
+                region=region,
+                refused=refused,
+            )
+        )
+    return providers, unknown
+
+
+def _session(*, profile: str | None, role_arn: str | None) -> Any:
+    """A boto3 session, optionally after assuming a role.
+
+    ``sts:AssumeRole`` does not go through :func:`.aws.readonly`, and it is
+    not itself a read — it is a declared exception to golden rule 2, not a
+    silent one. It is defensible rather than swept under the rug: assuming a
+    role changes nothing in the target account, and every call made *through*
+    the session this returns still goes through ``readonly`` exactly like
+    every other credential this tool ever uses. Nothing downstream is allowed
+    to reach for ``assume_role`` itself as a shortcut around the guard — this
+    function is the one seam in this module where it happens.
+
+    It is not the only place in the codebase that does this: :mod:`.sources`'s
+    ``_s3_client`` assumes a role to fetch Terraform state from S3 for the
+    identical reason, and is not declared in that module's own read-only
+    docstring. Worth fixing there too, on the same reasoning as here — flagged
+    rather than silently fixed, since it sits outside this module.
+    """
+    try:
+        import boto3
+    except ImportError as e:  # pragma: no cover - depends on install extras
+        raise ClickopsError(
+            "the AWS collector needs the `aws` extra: install with `uv tool install 'dora-roi[aws]'`."
+        ) from e
+
+    session = boto3.Session(profile_name=profile)
+    if role_arn is None:
+        return session
+    try:
+        assumed = session.client("sts").assume_role(RoleArn=role_arn, RoleSessionName="dora-roi")
+    except Exception as e:  # noqa: BLE001 - any assume-role failure costs this account, not the scan
+        raise AwsError(f"could not assume {role_arn}: {e}") from e
+    credentials = assumed["Credentials"]
+    return boto3.Session(
+        aws_access_key_id=credentials["AccessKeyId"],
+        aws_secret_access_key=credentials["SecretAccessKey"],
+        aws_session_token=credentials["SessionToken"],
+    )

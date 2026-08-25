@@ -497,9 +497,17 @@ class TestAwsWiring:
             payer_accounts=["123456789012"],
         )
 
+    def _no_marketplace(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Marketplace runs on every `--aws` scan now (see Task 7); stub it out
+        for tests that are only exercising Organizations/Cost Explorer, the
+        same way a bad `collect_organization` mock would otherwise leave a
+        real, unmocked Cost Explorer call touching the network."""
+        monkeypatch.setattr(cli_module, "collect_marketplace", lambda **k: ([], []))
+
     def test_accounts_become_b_01_02_hints(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(cli_module, "collect_organization", lambda **k: self._org())
         monkeypatch.setattr(cli_module, "collect_annual_expense", lambda **k: self._expense())
+        self._no_marketplace(monkeypatch)
         result = runner.invoke(app, ["scan", "-s", SAMPLE, "-o", str(tmp_path), "--aws"])
         assert result.exit_code == 0, result.output
         prefill = json.loads((tmp_path / "roi_prefill.json").read_text())
@@ -510,6 +518,7 @@ class TestAwsWiring:
     def test_an_account_hint_is_inferred_and_says_why(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(cli_module, "collect_organization", lambda **k: self._org())
         monkeypatch.setattr(cli_module, "collect_annual_expense", lambda **k: self._expense())
+        self._no_marketplace(monkeypatch)
         runner.invoke(app, ["scan", "-s", SAMPLE, "-o", str(tmp_path), "--aws"])
         prefill = json.loads((tmp_path / "roi_prefill.json").read_text())
         provenance = prefill["templates"]["B_01.02"][0]["provenance"]["0020"]
@@ -519,6 +528,7 @@ class TestAwsWiring:
     def test_cost_explorer_fills_the_provider_expense(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(cli_module, "collect_organization", lambda **k: self._org())
         monkeypatch.setattr(cli_module, "collect_annual_expense", lambda **k: self._expense())
+        self._no_marketplace(monkeypatch)
         runner.invoke(app, ["scan", "-s", SAMPLE, "-o", str(tmp_path), "--aws"])
         prefill = json.loads((tmp_path / "roi_prefill.json").read_text())
         aws = prefill["templates"]["B_05.01"][0]
@@ -536,16 +546,247 @@ class TestAwsWiring:
 
         monkeypatch.setattr(cli_module, "collect_organization", boom)
         monkeypatch.setattr(cli_module, "collect_annual_expense", boom)
+        self._no_marketplace(monkeypatch)
         result = runner.invoke(app, ["scan", "-s", SAMPLE, "-o", str(tmp_path), "--aws"])
         assert result.exit_code == 0
         assert "warning" in result.output.lower()
         assert (tmp_path / "roi_prefill.json").is_file()
 
+    def test_a_bare_botocore_failure_on_cost_explorer_also_degrades(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """`collect_annual_expense` has no guard of its own (unlike
+        `collect_organization`, which always raises `AwsError`), so a bare
+        credentials error from botocore reaches this function raw. It must
+        still degrade to a warning, never an unhandled crash."""
+        monkeypatch.setattr(cli_module, "collect_organization", lambda **k: self._org())
+
+        def boom(**_: object):
+            raise RuntimeError("Unable to locate credentials")
+
+        monkeypatch.setattr(cli_module, "collect_annual_expense", boom)
+        self._no_marketplace(monkeypatch)
+        result = runner.invoke(app, ["scan", "-s", SAMPLE, "-o", str(tmp_path), "--aws"])
+        assert result.exit_code == 0, result.output
+        assert "cost explorer" in result.output.lower()
+        assert (tmp_path / "roi_prefill.json").is_file()
+
     def test_the_perimeter_records_aws(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(cli_module, "collect_organization", lambda **k: self._org())
         monkeypatch.setattr(cli_module, "collect_annual_expense", lambda **k: self._expense())
+        self._no_marketplace(monkeypatch)
         runner.invoke(app, ["scan", "-s", SAMPLE, "-o", str(tmp_path), "--aws"])
         assert json.loads((tmp_path / "inventory.json").read_text())["perimeter"]["aws"] is True
+
+    def test_no_iac_at_all_still_writes_every_output_file(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """`--aws` with no `-s` and no state files at all: the case the vendor-
+        discovery channels exist to make meaningful. Marketplace alone (no
+        `--sources` aws: block needed) can find a vendor Terraform never
+        mentions, so this must not merely avoid crashing — it must produce a
+        register."""
+        monkeypatch.setattr(cli_module, "collect_organization", lambda **k: self._org())
+        monkeypatch.setattr(cli_module, "collect_annual_expense", lambda **k: self._expense())
+        self._no_marketplace(monkeypatch)
+        result = runner.invoke(app, ["scan", "-o", str(tmp_path), "--aws"])
+        assert result.exit_code == 0, result.output
+        for name in ("inventory.json", "roi_prefill.json", "gap-report.md", "gap-report.json", "methodology.md"):
+            assert (tmp_path / name).is_file(), name
+
+    def test_no_iac_marketplace_alone_produces_a_provider_row(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A pure Marketplace vendor, invisible to Terraform, still becomes a
+        FILLED B_05.01 row — the one thing a no-IaC scan could not do before
+        Task 7 wired this in."""
+        from decimal import Decimal
+
+        from dora_roi.collectors.clickops import VendorFact
+        from dora_roi.collectors.tfstate import DiscoveredProvider
+
+        monkeypatch.setattr(cli_module, "collect_organization", lambda **k: self._org())
+        monkeypatch.setattr(cli_module, "collect_annual_expense", lambda **k: self._expense())
+        monkeypatch.setattr(
+            cli_module,
+            "collect_marketplace",
+            lambda **k: (
+                [DiscoveredProvider(name="datadog", namespace="aws-marketplace", registry="aws-marketplace")],
+                [
+                    VendorFact(
+                        key="datadog",
+                        legal_name="Datadog, Inc.",
+                        annual_spend=Decimal("4200"),
+                        currency="USD",
+                        source="aws:ce",
+                    )
+                ],
+            ),
+        )
+
+        result = runner.invoke(app, ["scan", "-o", str(tmp_path), "--aws"])
+        assert result.exit_code == 0, result.output
+        prefill = json.loads((tmp_path / "roi_prefill.json").read_text())
+        [datadog] = [p for p in prefill["templates"]["B_05.01"] if p["values"]["0050"] == "Datadog, Inc."]
+        assert datadog["provenance"]["0050"]["status"] == "FILLED"
+        assert datadog["provenance"]["0050"]["source"] == "aws:ce"
+
+
+class TestAwsSweepWiring:
+    """The per-account sweep: which accounts get swept, and what happens to what they find."""
+
+    def _org(self, *account_ids: str):
+        from dora_roi.collectors.aws import DiscoveredAccount, OrganizationInventory
+
+        return OrganizationInventory(
+            organization_id="o-abc",
+            master_account_id=account_ids[0],
+            accounts=[
+                DiscoveredAccount(
+                    account_id=account_id, name=account_id, email=None, status="ACTIVE", ou_path=("Root",)
+                )
+                for account_id in account_ids
+            ],
+        )
+
+    def _expense(self):
+        from datetime import date
+
+        from dora_roi.collectors.aws import ExpenseReport
+
+        return ExpenseReport(currency=None, by_service={}, period=(date(2025, 8, 1), date(2026, 8, 1)))
+
+    def test_explicit_accounts_are_swept_one_call_each(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        from dora_roi.collectors.clickops import ExternalPrincipal
+        from dora_roi.collectors.tfstate import DiscoveredProvider
+
+        monkeypatch.setattr(cli_module, "collect_organization", lambda **k: self._org("111122223333", "444455556666"))
+        monkeypatch.setattr(cli_module, "collect_annual_expense", lambda **k: self._expense())
+        monkeypatch.setattr(cli_module, "collect_marketplace", lambda **k: ([], []))
+
+        calls: list[dict] = []
+
+        def fake_sweep(**kwargs: object):
+            calls.append(kwargs)
+            return (
+                [DiscoveredProvider(name="okta", namespace="aws", registry="aws-iam-idp")],
+                [ExternalPrincipal(account_id="999988887777", role_name="Mystery", has_external_id=False)],
+            )
+
+        monkeypatch.setattr(cli_module, "collect_clickops", fake_sweep)
+
+        sources_file = tmp_path / "sources.yaml"
+        sources_file.write_text(
+            "states: []\naws:\n  accounts:\n    - id: '444455556666'\n      profile: member-profile\n"
+        )
+
+        result = runner.invoke(app, ["scan", "-o", str(tmp_path), "--aws", "--sources", str(sources_file)])
+        assert result.exit_code == 0, result.output
+
+        # Explicit accounts say exactly what gets read: one account, one call.
+        assert len(calls) == 1
+        assert calls[0]["account_id"] == "444455556666"
+        assert calls[0]["profile"] == "member-profile"
+        assert calls[0]["own_accounts"] == frozenset({"111122223333", "444455556666"})
+
+        names = {
+            p["values"]["0050"] for p in json.loads((tmp_path / "roi_prefill.json").read_text())["templates"]["B_05.01"]
+        }
+        # "okta" is a mapped key in the packaged provider_mapping.yaml; its
+        # legal name, not the raw provider key, is what should land in 0050.
+        assert "Okta, Inc." in names
+
+    def test_assume_role_name_sweeps_every_organization_account(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(cli_module, "collect_organization", lambda **k: self._org("111122223333", "444455556666"))
+        monkeypatch.setattr(cli_module, "collect_annual_expense", lambda **k: self._expense())
+        monkeypatch.setattr(cli_module, "collect_marketplace", lambda **k: ([], []))
+
+        calls: list[dict] = []
+
+        def fake_sweep(**kwargs: object):
+            calls.append(kwargs)
+            return [], []
+
+        monkeypatch.setattr(cli_module, "collect_clickops", fake_sweep)
+
+        sources_file = tmp_path / "sources.yaml"
+        sources_file.write_text("states: []\naws:\n  assume_role_name: dora-roi-readonly\n")
+
+        result = runner.invoke(app, ["scan", "-o", str(tmp_path), "--aws", "--sources", str(sources_file)])
+        assert result.exit_code == 0, result.output
+
+        swept = {(c["account_id"], c["role_arn"]) for c in calls}
+        assert swept == {
+            ("111122223333", "arn:aws:iam::111122223333:role/dora-roi-readonly"),
+            ("444455556666", "arn:aws:iam::444455556666:role/dora-roi-readonly"),
+        }
+
+    def test_assume_role_name_with_no_organization_is_refused_not_silent(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Task 8 renders `clickops_refused`; this just checks the sweep does
+        not pretend an unreachable Organizations call means nothing to sweep."""
+        from dora_roi.cli import _collect_aws, _Sources
+        from dora_roi.collectors.aws import AwsError
+        from dora_roi.collectors.sources import AwsSweep
+
+        monkeypatch.setattr(cli_module, "collect_organization", lambda **k: (_ for _ in ()).throw(AwsError("denied")))
+        monkeypatch.setattr(cli_module, "collect_annual_expense", lambda **k: self._expense())
+        monkeypatch.setattr(cli_module, "collect_marketplace", lambda **k: ([], []))
+        called = []
+        monkeypatch.setattr(cli_module, "collect_clickops", lambda **k: called.append(k))
+
+        sources = _Sources(states=[], aws=True, aws_sweep=AwsSweep(assume_role_name="dora-roi-readonly"))
+        entities = _collect_aws([], [], {}, sources)
+
+        assert entities == []
+        assert called == []
+        assert sources.clickops_refused and "assume_role_name" in sources.clickops_refused[0]
+
+
+class TestAwsSweepAccounting:
+    """Direct checks on what `_collect_aws` records on `_Sources` — the data
+    Task 8 renders, so it has to be right even though nothing prints it yet."""
+
+    def test_records_swept_accounts_and_unnamed_principals(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from datetime import date
+
+        from dora_roi.cli import _collect_aws, _Sources
+        from dora_roi.collectors.aws import DiscoveredAccount, ExpenseReport, OrganizationInventory
+        from dora_roi.collectors.clickops import ExternalPrincipal
+        from dora_roi.collectors.sources import AwsAccount, AwsSweep
+
+        org = OrganizationInventory(
+            organization_id="o-x",
+            master_account_id="111122223333",
+            accounts=[
+                DiscoveredAccount(
+                    account_id="111122223333", name="root", email=None, status="ACTIVE", ou_path=("Root",)
+                )
+            ],
+        )
+        monkeypatch.setattr(cli_module, "collect_organization", lambda **k: org)
+        monkeypatch.setattr(
+            cli_module,
+            "collect_annual_expense",
+            lambda **k: ExpenseReport(currency=None, by_service={}, period=(date(2025, 8, 1), date(2026, 8, 1))),
+        )
+        monkeypatch.setattr(cli_module, "collect_marketplace", lambda **k: ([], []))
+
+        principal = ExternalPrincipal(account_id="999988887777", role_name="Mystery", has_external_id=False)
+        monkeypatch.setattr(cli_module, "collect_clickops", lambda **k: ([], [principal]))
+
+        sources = _Sources(
+            states=[],
+            aws=True,
+            aws_sweep=AwsSweep(accounts=(AwsAccount(id="444455556666", profile="member"),)),
+        )
+
+        _collect_aws([], [], {}, sources)
+
+        assert sources.swept_accounts == ["444455556666"]
+        assert sources.unnamed_principals == [principal]
+        assert sources.clickops_refused == []
 
 
 class TestKubernetesWiring:
@@ -866,6 +1107,7 @@ class TestCostExplorerScope:
         monkeypatch.setattr(cli_module, "collect_organization", lambda **k: self._org())
         monkeypatch.setattr(cli_module, "calling_account", lambda *a, **k: calling)
         monkeypatch.setattr(cli_module, "collect_annual_expense", lambda **k: self._expense(k.get("payer_accounts")))
+        monkeypatch.setattr(cli_module, "collect_marketplace", lambda **k: ([], []))
 
     def test_a_member_account_is_flagged_not_passed_off_as_the_organisation(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

@@ -27,13 +27,29 @@ from rich.table import Table
 from dora_roi import __version__
 from dora_roi.collectors.aws import (
     AwsError,
+    OrganizationInventory,
     calling_account,
     collect_annual_expense,
     collect_organization,
     expense_for_provider,
 )
+from dora_roi.collectors.clickops import (
+    ClickopsError,
+    ExternalPrincipal,
+    VendorFact,
+    collect_clickops,
+    collect_marketplace,
+)
 from dora_roi.collectors.k8s import K8sError, collect_kubernetes
-from dora_roi.collectors.sources import SourceError, StateSource, fetch_sources, load_sources
+from dora_roi.collectors.sources import (
+    AwsAccount,
+    AwsSweep,
+    SourceError,
+    StateSource,
+    fetch_sources,
+    load_aws_sweep,
+    load_sources,
+)
 from dora_roi.collectors.tfstate import (
     DiscoveredProvider,
     TfstateError,
@@ -379,6 +395,7 @@ def scan(
     """Discover, enrich and prefill, then write the register and the gap report."""
     try:
         remote = load_sources(sources_file) if sources_file else []
+        aws_sweep = load_aws_sweep(sources_file) if sources_file else None
     except SourceError as e:
         _fail(e)
     sources = _Sources(
@@ -386,6 +403,7 @@ def scan(
         remote=remote,
         aws=aws,
         aws_profile=aws_profile,
+        aws_sweep=aws_sweep,
         k8s=k8s or k8s_context is not None or kubeconfig is not None,
         k8s_context=k8s_context,
         kubeconfig=kubeconfig,
@@ -394,7 +412,7 @@ def scan(
         _fail(ValueError("nothing to scan: pass -s/--state, --sources, --aws or --k8s."))
     try:
         _scan(sources, output, gleif, mapping_file, overlay_file)
-    except (TfstateError, MappingError, OverlayError, AwsError, K8sError, SourceError) as e:
+    except (TfstateError, MappingError, OverlayError, AwsError, ClickopsError, K8sError, SourceError) as e:
         _fail(e)
     except typer.Exit:
         raise
@@ -412,6 +430,12 @@ class _Sources:
     remote: list[StateSource] = field(default_factory=list)
     aws: bool = False
     aws_profile: str | None = None
+    #: Which accounts the vendor-discovery channels sweep, and whose
+    #: credentials — the ``aws:`` block of a ``--sources`` file. ``None`` when
+    #: no such file was given: marketplace still runs (it needs only the
+    #: top-level profile), but the per-account channels have no account list
+    #: to sweep without one.
+    aws_sweep: AwsSweep | None = None
     k8s: bool = False
     k8s_context: str | None = None
     kubeconfig: Path | None = None
@@ -421,6 +445,18 @@ class _Sources:
 
     #: What was in reach and deliberately not read, for the methodology note.
     excluded: list[str] = field(default_factory=list)
+
+    #: What the vendor-discovery channels said no to: a bad profile, an
+    #: unassumable role, a denied IAM or Cost Explorer call. Task 8 renders
+    #: this in the methodology note the same way `excluded` already is.
+    clickops_refused: list[str] = field(default_factory=list)
+    #: External AWS accounts with standing access (a trust policy naming them)
+    #: that no table could name as a vendor. Task 8 raises this as a finding.
+    unnamed_principals: list[ExternalPrincipal] = field(default_factory=list)
+    #: Accounts the per-account channels actually swept, for the perimeter
+    #: statement: an account this run never reached must not read as one with
+    #: nothing in it.
+    swept_accounts: list[str] = field(default_factory=list)
 
     def any(self) -> bool:
         return bool(self.states) or bool(self.remote) or self.aws or self.k8s
@@ -490,12 +526,18 @@ def _scan(
     mapping = load_mapping(mapping_file)
 
     rows = [provider_to_tpp(provider, mapping) for provider in discovered]
-    if use_gleif:
-        _enrich_with_gleif(rows)
 
+    # Before GLEIF, not after: a vendor Marketplace or the account sweep finds
+    # that Terraform never mentioned still deserves an LEI lookup, and
+    # `_collect_aws` is what appends its row. Running GLEIF first would leave
+    # every clickops-discovered provider without one, silently, just because
+    # it was found a few lines later than everything else.
     group_entities: list[GroupEntity] = []
     if sources.aws:
-        group_entities = _collect_aws(discovered, rows, sources.aws_profile)
+        group_entities = _collect_aws(discovered, rows, mapping, sources)
+
+    if use_gleif:
+        _enrich_with_gleif(rows)
 
     arrangements, links = _synthesise_arrangements(discovered, mapping)
     roi = RegisterOfInformation(
@@ -654,15 +696,28 @@ def _synthesise_arrangements(
 
 
 def _collect_aws(
-    discovered: list[DiscoveredProvider], rows: list[ThirdPartyProvider], profile: str | None
+    discovered: list[DiscoveredProvider],
+    rows: list[ThirdPartyProvider],
+    mapping: dict[str, ProviderMapping],
+    sources: _Sources,
 ) -> list[GroupEntity]:
-    """Organizations into B_01.02 hints, Cost Explorer into the provider expense.
+    """Organizations, Cost Explorer, and every vendor-discovery channel: marketplace and the account sweep.
 
-    Both degrade to a warning. AWS being unreachable, or the caller lacking one
-    of the read permissions, is not a reason to throw away a scan that already
-    read the state files.
+    Every one of these degrades to a warning or a ``refused`` entry of its own:
+    AWS being unreachable, or the caller lacking one read permission, is not a
+    reason to throw away a scan that already read the state files, and one
+    channel failing is not a reason to skip the others.
+
+    ``discovered`` and ``rows`` are mutated in place: a vendor found only by
+    Marketplace, an identity provider, an EventBridge partner or a trust
+    policy has no Terraform footprint to have built a row from already, and
+    :func:`_fold_in` is what gives it one — the entire point of this module,
+    per its own docstring, since most of what it finds appears in no
+    ``required_providers`` block at all.
     """
+    profile = sources.aws_profile
     entities: list[GroupEntity] = []
+    organization: OrganizationInventory | None = None
     try:
         organization = collect_organization(profile=profile)
     except AwsError as e:
@@ -681,40 +736,162 @@ def _collect_aws(
         report = collect_annual_expense(profile=profile, payer_accounts=[billed] if billed else None)
     except (AwsError, NameError) as e:
         err.print(f"[yellow]Warning:[/yellow] AWS Cost Explorer unavailable: {e}")
-        return entities
+        report = None
+    except Exception as e:  # noqa: BLE001 - a missing credential must degrade, not crash the scan
+        # `collect_annual_expense` calls `readonly()` with no guard of its own
+        # (unlike `collect_organization`, which wraps every failure into
+        # `AwsError`), so botocore's own exceptions — no credentials found, an
+        # unreachable region — reach here raw. The constraint this task is
+        # built on is "nothing raises on a missing permission or a bad
+        # credential", and this channel is no exception to it just because its
+        # own module does not wrap its errors yet.
+        err.print(f"[yellow]Warning:[/yellow] AWS Cost Explorer unavailable: {type(e).__name__}: {e}")
+        report = None
 
-    master = organization.master_account_id if entities else None
-    if billed and master and billed != master:
-        err.print(
-            f"[yellow]Warning:[/yellow] Cost Explorer was called from account {billed}, which is not the "
-            f"organisation's payer ({master}). The figure covers that account's own spend only — for the "
-            f"whole organisation, re-run with the payer's profile."
-        )
-
-    for provider, row in zip(discovered, rows, strict=True):
-        amount = expense_for_provider(provider.name, report)
-        if amount is None:
-            continue
-        # AWS's own total needs no guess: the state says `hashicorp/aws` and the
-        # bill says AWS. A Marketplace seller is matched by name against our own
-        # table, so its figure inherits that table's uncertainty.
-        direct = provider.name == "aws"
-        status = FieldStatus.FILLED if direct else FieldStatus.INFERRED
-        note = (
-            report.provenance_note
-            if direct
-            else (
-                f"{report.provenance_note} Attributed to this provider by matching the seller name on "
-                f"the Marketplace line, which is dora-roi's own table and not a billing relationship "
-                f"AWS asserts."
+    if report is not None:
+        master = organization.master_account_id if organization is not None else None
+        if billed and master and billed != master:
+            err.print(
+                f"[yellow]Warning:[/yellow] Cost Explorer was called from account {billed}, which is not the "
+                f"organisation's payer ({master}). The figure covers that account's own spend only — for the "
+                f"whole organisation, re-run with the payer's profile."
             )
-        )
-        row.total_annual_expense = amount
-        row.mark("total_annual_expense", status, source="aws:ce", note=note)
-        if report.currency:
-            row.currency = report.currency
-            row.mark("currency", status, source="aws:ce", note=note)
+
+        for provider, row in zip(discovered, rows, strict=True):
+            amount = expense_for_provider(provider.name, report)
+            if amount is None:
+                continue
+            # AWS's own total needs no guess: the state says `hashicorp/aws` and the
+            # bill says AWS. A Marketplace seller is matched by name against our own
+            # table, so its figure inherits that table's uncertainty.
+            direct = provider.name == "aws"
+            status = FieldStatus.FILLED if direct else FieldStatus.INFERRED
+            note = (
+                report.provenance_note
+                if direct
+                else (
+                    f"{report.provenance_note} Attributed to this provider by matching the seller name on "
+                    f"the Marketplace line, which is dora-roi's own table and not a billing relationship "
+                    f"AWS asserts."
+                )
+            )
+            row.total_annual_expense = amount
+            row.mark("total_annual_expense", status, source="aws:ce", note=note)
+            if report.currency:
+                row.currency = report.currency
+                row.mark("currency", status, source="aws:ce", note=note)
+
+    # Marketplace answers for the payer, once, regardless of whether an `aws:`
+    # sweep block was ever configured — it needs nothing beyond the top-level
+    # profile, and it is the channel that makes a bare `--aws`, no state files
+    # at all, a scan worth running.
+    marketplace_providers, facts = collect_marketplace(profile=profile, refused=sources.clickops_refused)
+    _fold_in(discovered, rows, mapping, marketplace_providers)
+
+    own_accounts = frozenset(a.account_id for a in organization.accounts) if organization is not None else frozenset()
+    sweep = sources.aws_sweep
+    if sweep is not None:
+        accounts = _sweep_accounts(sweep, organization)
+        if not accounts and sweep.assume_role_name and organization is None:
+            sources.clickops_refused.append(
+                "aws sweep: assume_role_name is set but AWS Organizations was unreachable, so there is no "
+                "account list to assume it into."
+            )
+        regions = frozenset(region for provider in discovered for region in provider.regions)
+        for sweep_account in accounts:
+            account_id = sweep_account.id or sweep_account.role_arn or "unknown account"
+            swept, unknown = collect_clickops(
+                profile=sweep_account.profile or sweep.profile,
+                role_arn=sweep_account.role_arn,
+                account_id=account_id,
+                own_accounts=own_accounts,
+                regions=regions,
+                refused=sources.clickops_refused,
+            )
+            _fold_in(discovered, rows, mapping, swept)
+            sources.unnamed_principals.extend(unknown)
+            sources.swept_accounts.append(account_id)
+
+    _apply_vendor_facts(rows, facts)
     return entities
+
+
+def _sweep_accounts(sweep: AwsSweep, organization: OrganizationInventory | None) -> list[AwsAccount]:
+    """Which accounts the per-account channels read: explicit, or every member via one role.
+
+    Explicit accounts say exactly what will be read and always win outright —
+    the same "explicit beats a shortcut" rule :class:`.sources.AwsSweep`
+    documents for itself. The ``assume_role_name`` shortcut only ever fires
+    when nothing explicit was given *and* there is an organisation to
+    enumerate: asking to assume a role in "every account" means nothing
+    without a list of accounts to assume it in.
+    """
+    if sweep.accounts:
+        return list(sweep.accounts)
+    if sweep.assume_role_name and organization is not None:
+        return [
+            AwsAccount(
+                id=account.account_id,
+                role_arn=f"arn:aws:iam::{account.account_id}:role/{sweep.assume_role_name}",
+            )
+            for account in organization.accounts
+        ]
+    return []
+
+
+def _fold_in(
+    discovered: list[DiscoveredProvider],
+    rows: list[ThirdPartyProvider],
+    mapping: dict[str, ProviderMapping],
+    new: list[DiscoveredProvider],
+) -> None:
+    """Add what a vendor-discovery channel found, without duplicating a row.
+
+    A vendor a channel finds under a key some other source already claimed —
+    Marketplace billing ``datadog`` next to a Terraform ``datadog`` provider
+    block, or the same identity provider seen in two swept accounts — is the
+    same vendor, not two: :func:`.tfstate.merge_providers` folds the evidence
+    together, and the row that already exists for it is what
+    :func:`_apply_vendor_facts` updates next. Only a name genuinely new to
+    this scan earns a fresh, INFERRED row here.
+    """
+    if not new:
+        return
+    known = {provider.name for provider in discovered}
+    discovered[:] = merge_providers([discovered, new])
+    for provider in discovered:
+        if provider.name not in known:
+            rows.append(provider_to_tpp(provider, mapping))
+
+
+def _apply_vendor_facts(rows: list[ThirdPartyProvider], facts: list[VendorFact]) -> None:
+    """Turn authoritative billing facts into FILLED fields.
+
+    This lives here and not in :func:`.mapping.provider_to_tpp` on purpose.
+    That function builds a row from the provider mapping, which is a table of
+    guesses, and it must stay structurally incapable of producing a FILLED
+    value even by accident — golden rule 1 is worth more as a property of the
+    code than as a review comment. Authoritative facts flow in from outside
+    it instead, applied here, after every row already exists.
+
+    The overlay still wins. A billing API knows who invoices you; only a human
+    holding the contract knows which entity was actually signed with, and the
+    two are different companies more often than the bill suggests.
+    """
+    by_key = {fact.key: fact for fact in facts}
+    for row in rows:
+        fact = by_key.get(row.source_key or "")
+        if fact is None:
+            continue
+        if row.status_of("legal_name") is FieldStatus.FILLED:
+            continue
+        row.legal_name = fact.legal_name
+        row.mark(
+            "legal_name",
+            FieldStatus.FILLED,
+            source=fact.source,
+            note="seller of record on the AWS Marketplace charges for this account",
+        )
 
 
 def _join_supply_chain(roi: RegisterOfInformation) -> None:
