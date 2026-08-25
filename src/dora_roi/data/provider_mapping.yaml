@@ -373,3 +373,18 @@ amplitude:
   hq_country: US
   services: [S19, S06]
   notes: Product analytics.
+
+# --- Reached through an EventBridge partner event source, not a Terraform
+# provider or a DNS record ---------------------------------------------------
+# A SaaS pushing events straight into your account's default bus is a vendor
+# relationship even though nothing in your Terraform state or your DNS zone
+# names it. AWS's own published EventBridge SaaS partners; the key is what the
+# EventBridge collector (`collectors/clickops.py`) emits.
+
+shopify:
+  vendor: Shopify Inc.
+  hq_country: CA
+  services: [S19, S18]
+  notes: >-
+    E-commerce platform; found here only through its EventBridge partner event
+    source, since it carries no Terraform provider of its own.

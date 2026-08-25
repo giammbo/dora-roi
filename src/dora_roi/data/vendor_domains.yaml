@@ -55,6 +55,7 @@ pagerduty.com: pagerduty
 # --- data platforms ---------------------------------------------------------
 snowflakecomputing.com: snowflake
 mongodb.net: mongodbatlas
+mongodb.com: mongodbatlas
 confluent.cloud: confluent
 
 # --- source control and delivery -------------------------------------------
@@ -99,3 +100,9 @@ scw.cloud: scaleway
 ovh.net: ovh
 aruba.it: aruba
 arubabusiness.it: aruba
+
+# --- reached through an EventBridge partner event source --------------------
+# AWS's own published SaaS partner integrations. None of these carry a
+# Terraform provider or a DNS record of the same name; the key is what
+# `collect_partner_event_sources` (collectors/clickops.py) emits.
+shopify.com: shopify

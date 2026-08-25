@@ -52,7 +52,13 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 else:
     CostExplorerClient = Any
 
-__all__ = ["ClickopsError", "VendorFact", "collect_identity_providers", "collect_marketplace"]
+__all__ = [
+    "ClickopsError",
+    "VendorFact",
+    "collect_identity_providers",
+    "collect_marketplace",
+    "collect_partner_event_sources",
+]
 
 #: Cost Explorer's name for the billing entity that groups every Marketplace
 #: seller's line items. It is also the placeholder AWS uses for a Marketplace
@@ -359,3 +365,78 @@ def _record(into: dict[str, DiscoveredProvider], blob: str, evidence: str, accou
         else:
             existing.resource_types[evidence] += 1
             existing.resource_count += 1
+
+
+#: AWS's own naming convention for a partner event source, spelled out here
+#: because it is a fact about the EventBridge API, not something dora-roi
+#: infers: ``aws.partner/<host>/<rest>``. ``default`` and any customer-defined
+#: source lack it entirely, and are not partner integrations.
+_PARTNER_SOURCE_PREFIX = "aws.partner/"
+
+
+def collect_partner_event_sources(
+    client: Any, *, account_id: str, region: str, refused: list[str]
+) -> list[DiscoveredProvider]:
+    """SaaS partners wired straight into this account's event bus.
+
+    INFERRED, always, for the same reason as :func:`collect_identity_providers`:
+    a partner event source name carries the hostname AWS uses to label the
+    integration (``aws.partner/datadoghq.com/...``), and a hostname says who
+    is pushing events in, not which legal entity you contracted with.
+
+    Regional, unlike every other channel in this module: an EventBridge event
+    bus exists per region, so the caller runs this once per account *and* per
+    region already in the perimeter — never every enabled region, which would
+    multiply the calls by twenty to find nothing almost every time, and the
+    methodology exists precisely to say which regions were never looked at.
+    ``region`` lands in ``source_files`` as ``aws:events:<account_id>:<region>``
+    so a finding here is never confused with one from :func:`collect_identity_providers`,
+    which is account-wide.
+
+    Takes a client, not a profile or a session: the caller constructs one
+    ``events`` client per region and passes it straight in, the same
+    convention every other channel in this module uses.
+    """
+    try:
+        response = readonly(client, "list_event_sources")
+    except Exception as e:  # noqa: BLE001 - a denial is a perimeter fact, not a crash
+        refused.append(f"{account_id}/{region} eventbridge: events:ListEventSources denied ({type(e).__name__}: {e})")
+        return []
+
+    found: dict[str, DiscoveredProvider] = {}
+    for source in response.get("EventSources", []):
+        vendor = _partner_source_vendor(source.get("Name", ""))
+        if vendor is None:
+            continue
+        existing = found.get(vendor)
+        if existing is None:
+            found[vendor] = DiscoveredProvider(
+                name=vendor,
+                namespace="aws",
+                registry="aws-eventbridge",
+                resource_count=1,
+                resource_types=Counter({"partner_event_source": 1}),
+                regions={region},
+                source_files={f"aws:events:{account_id}:{region}"},
+            )
+        else:
+            existing.resource_types["partner_event_source"] += 1
+            existing.resource_count += 1
+
+    return sorted(found.values(), key=lambda p: p.name)
+
+
+def _partner_source_vendor(name: str) -> str | None:
+    """The vendor named by one EventBridge event source, or nothing.
+
+    A source name that does not carry the partner prefix at all — ``default``,
+    a customer-defined source — is skipped before a host is even extracted:
+    it is not a partner integration, so it is not a candidate vendor either.
+    An unrecognised host past the prefix is skipped the same way
+    :func:`.domains.vendor_for_host` skips any other unmapped host: nothing
+    invented, ever.
+    """
+    if not name.startswith(_PARTNER_SOURCE_PREFIX):
+        return None
+    host = name[len(_PARTNER_SOURCE_PREFIX) :].split("/", 1)[0]
+    return vendor_for_host(host)
