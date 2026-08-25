@@ -26,7 +26,7 @@ from dora_roi.collectors.tfstate import NON_VENDOR_PROVIDERS
 from dora_roi.models.enums import FieldStatus
 from dora_roi.report.gap import GapEntry, summarize
 
-__all__ = ["to_markdown"]
+__all__ = ["refusal_kind", "to_markdown"]
 
 _METHOD = """\
 Vendors were identified from three kinds of evidence, and nothing else:
@@ -73,6 +73,53 @@ _EVENTBRIDGE_NO_REGIONS_PREFIX = "eventbridge: no regions known"
 _MARKETPLACE_PREFIX = "marketplace: "
 _COST_EXPLORER_PREFIX = "cost explorer: "
 _AWS_SWEEP_PREFIX = "aws sweep: "
+_NO_CREDS_TEXT = ": no usable credentials"
+_PARSE_FAILURE_TEXT = "unreadable trust policy"
+
+#: The two independent `list_*` calls `collect_identity_providers` makes —
+#: see `clickops.py`'s own `_ACTION_NAME` table. A denial on one of them
+#: only fails *that* provider type; the other is attempted regardless (see
+#: `collect_identity_providers`'s own code, one `_listed()` call per type,
+#: neither gated on the other). Review finding R5: treating a single one of
+#: these two denials as a whole-channel refusal renders "refused" next to a
+#: register row the *other*, unaffected call itself produced.
+_IDP_LIST_ACTIONS = ("iam:ListSAMLProviders", "iam:ListOpenIDConnectProviders")
+
+
+def refusal_kind(line: str) -> str:
+    """Classify one `clickops_refused` line the same way for every surface
+    that renders one, so the console (`cli._print_perimeter`) and this
+    module can never describe the same line two different ways — the
+    contradiction a review found (R2): the console labelled a trust-policy
+    parse failure and an unreached account "Refused" while this module
+    explains, correctly, that neither is AWS refusing anything.
+
+    Returns one of:
+
+    - ``"not_reached"`` — no session could be established for the account
+      at all (`"<account>: no usable credentials"`).
+    - ``"parse_failure"`` — dora-roi's own failure to parse something AWS
+      returned (`"unreadable trust policy on role ..."`); AWS said nothing.
+    - ``"not_attempted"`` — a channel or sweep that was never even tried,
+      for a reason the message itself names (no known region, no resolved
+      account list).
+    - ``"denied"`` — AWS said no to a specific action. The only kind this
+      tool's own vocabulary calls a *refusal*.
+
+    Works on a raw, whole-run `clickops_refused` line (still carrying its
+    `"<account> <channel>: "` prefix) and on the same line already stripped
+    of that prefix (as `_classify_refusals` produces) alike: every check
+    here is a substring match on text that never appears inside the other
+    two, never a match anchored to where the account happened to end.
+    """
+    if _NO_CREDS_TEXT in line:
+        return "not_reached"
+    if _PARSE_FAILURE_TEXT in line:
+        return "parse_failure"
+    if line.startswith(_EVENTBRIDGE_NO_REGIONS_PREFIX) or line.startswith(_AWS_SWEEP_PREFIX):
+        return "not_attempted"
+    return "denied"
+
 
 #: `resource_types` keys that credit one account's own evidence to one
 #: specific channel — see `collectors/clickops.py`'s `_record`,
@@ -129,20 +176,26 @@ def _found(evidence: Sequence[str], keys: Sequence[str]) -> bool:
 
 
 def _idp_line(refusals: list[str], found: bool) -> str:
-    """Identity providers: a *list* denial costs the whole channel; a *get*
-    denial costs one already-listed provider's document and nothing else.
-    Collapsing the two (review finding I2) would call a channel that partly
-    succeeded — vendors from other providers were still recorded — a total
-    refusal, which the register itself would then contradict.
+    """Identity providers is really two independent list calls (SAML, OIDC)
+    plus a `get` per item either one returns. A `get` denial costs one
+    already-listed provider's document and nothing else (review finding I2).
+    A `list` denial only costs the *whole* channel if it hits **both** list
+    calls — one type denied while the other succeeded, and possibly found a
+    vendor, is the same partial shape, not a total refusal (review finding
+    R5: I2's own defect, one call pair over). Collapsing either into a whole
+    refusal would contradict a register that still carries a row this
+    channel itself produced.
     """
-    whole = [r for r in refusals if "iam:List" in r]
+    list_denials = [r for r in refusals if any(action in r for action in _IDP_LIST_ACTIONS)]
+    denied_list_actions = {action for action in _IDP_LIST_ACTIONS if any(action in r for r in list_denials)}
+    whole = list_denials if denied_list_actions == set(_IDP_LIST_ACTIONS) else []
     partial = [r for r in refusals if r not in whole]
     if whole:
         return f"  - Identity providers: refused — {'; '.join(whole)}"
     if partial:
         return (
-            f"  - Identity providers: read, but could not retrieve {len(partial)} provider "
-            f"document(s) — {'; '.join(partial)}"
+            f"  - Identity providers: read, but could not fully enumerate this account's "
+            f"identity providers — {'; '.join(partial)}"
         )
     return f"  - Identity providers: {'read' if found else 'read, no result'}"
 
@@ -183,6 +236,29 @@ def _eventbridge_line(refusals: list[str], found: bool, no_regions_known: bool) 
     return f"  - Partner event sources: {'read' if found else 'read, no result'}"
 
 
+def _withhold_if_uncertain(line: str, has_residual: bool) -> str:
+    """A refusal this note could not attribute to a channel might in fact
+    belong to the very channel a line otherwise reports cleanly — a bare
+    `read` or `read, no result` claim must not stand, unqualified, next to an
+    unattributed refusal for the same account. A review found exactly this:
+    the residual heading disclosed the refusal without ever withdrawing the
+    positive claim standing above it, which is not two facts side by side —
+    it is a contradiction (R1). A line that already carries its own
+    refused/partial/not-swept state is left alone: it already says something
+    happened, and is not the line the unattributed refusal could be hiding
+    behind.
+    """
+    if not has_residual:
+        return line
+    if any(marker in line for marker in ("refused", "could not fully enumerate", "could not parse", "not swept")):
+        return line
+    label = line.split(":", 1)[0].removeprefix("  - ")
+    return (
+        f"  - {label}: unconfirmed — this account also has a refusal this note could not "
+        f"attribute to a channel (see below); it may belong here"
+    )
+
+
 def _accounts_swept_section(perimeter: dict[str, Any]) -> list[str]:
     """Golden rule 5, applied to the four click-ops channels: never let a
     reader conclude an account or a channel was read when it was refused, or
@@ -191,9 +267,13 @@ def _accounts_swept_section(perimeter: dict[str, Any]) -> list[str]:
     swept_accounts: list[tuple[str, list[str]]] = [
         (account_id, list(refusals)) for account_id, refusals in (perimeter.get("swept_accounts") or [])
     ]
-    swept_evidence: dict[str, list[str]] = {
-        account_id: list(keys) for account_id, keys in (perimeter.get("swept_evidence") or {}).items()
-    }
+    # A list, positionally aligned with `swept_accounts` — never a dict keyed
+    # by account_id. `account_id` is not guaranteed unique: two profile-only
+    # sweep entries with neither `id` nor `role_arn` both collapse to the
+    # literal string "unknown account" (cli.py's own fallback), and a review
+    # found that a dict then silently drops the first account's evidence
+    # under the second's key (R4).
+    swept_evidence: list[list[str]] = [list(keys) for keys in (perimeter.get("swept_evidence") or [])]
     unreachable_accounts: list[tuple[str, str]] = [
         (account_id, message) for account_id, message in (perimeter.get("unreachable_accounts") or [])
     ]
@@ -217,7 +297,10 @@ def _accounts_swept_section(perimeter: dict[str, Any]) -> list[str]:
         "the world — this note is the one place they are told apart. A single provider's "
         "document dora-roi could not retrieve, or a single role's trust policy it could not "
         "parse, does not fail the whole channel either — both are called out on their own, "
-        "distinctly from an AWS denial.",
+        "distinctly from an AWS denial. And a refusal this note could not attribute to any "
+        "of the three channels marks every otherwise-clean line **unconfirmed** instead of "
+        "read or empty, because that unattributed refusal might belong to exactly that "
+        "channel.",
         "",
     ]
 
@@ -225,14 +308,22 @@ def _accounts_swept_section(perimeter: dict[str, Any]) -> list[str]:
     residual_by_account: list[tuple[str, str]] = []
 
     if swept_accounts:
-        for account_id, refusals in swept_accounts:
+        for index, (account_id, refusals) in enumerate(swept_accounts):
             idp_refused, trust_refused, eb_refused, residual = _classify_refusals(account_id, refusals)
-            evidence = swept_evidence.get(account_id, [])
+            evidence = swept_evidence[index] if index < len(swept_evidence) else []
+            has_residual = bool(residual)
 
             out.append(f"- **{account_id}**")
-            out.append(_idp_line(idp_refused, _found(evidence, _IDP_FOUND_KEYS)))
-            out.append(_trust_line(trust_refused, _found(evidence, (_TRUST_FOUND_KEY,))))
-            out.append(_eventbridge_line(eb_refused, _found(evidence, (_EVENTBRIDGE_FOUND_KEY,)), no_regions_known))
+            out.append(_withhold_if_uncertain(_idp_line(idp_refused, _found(evidence, _IDP_FOUND_KEYS)), has_residual))
+            out.append(
+                _withhold_if_uncertain(_trust_line(trust_refused, _found(evidence, (_TRUST_FOUND_KEY,))), has_residual)
+            )
+            out.append(
+                _withhold_if_uncertain(
+                    _eventbridge_line(eb_refused, _found(evidence, (_EVENTBRIDGE_FOUND_KEY,)), no_regions_known),
+                    has_residual,
+                )
+            )
             residual_by_account += [(account_id, line) for line in residual]
         out.append("")
     elif aws_sweep_configured:

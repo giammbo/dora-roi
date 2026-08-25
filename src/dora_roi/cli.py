@@ -74,6 +74,7 @@ from dora_roi.models.templates import (
 )
 from dora_roi.overlay.vendors import OverlayError, apply_overlay, load_overlay, overlay_template
 from dora_roi.report.gap import build_gap_report, summarize, to_json, to_markdown
+from dora_roi.report.methodology import refusal_kind
 from dora_roi.report.methodology import to_markdown as methodology_markdown
 
 EXIT_OK = 0
@@ -486,17 +487,26 @@ class _Sources:
     #: silently misfiled the refusal under the wrong account and rendered a
     #: denied call as a clean empty result.
     swept_accounts: list[tuple[str, list[str]]] = field(default_factory=list)
-    #: account_id -> the raw, unmerged providers `collect_clickops` returned
-    #: for that one account, before `_fold_in` folds them into the shared,
-    #: cross-account register. `tfstate.merge_providers` unions
-    #: `resource_types` and `source_files` by provider name across *every*
-    #: account and channel it is ever called with (by design — it is what
-    #: lets one vendor's evidence from two accounts become one row) which
-    #: also destroys, once merged, which channel in which account actually
-    #: found something. The methodology note needs that association kept
-    #: apart, per account, or two accounts sharing one vendor render as if
-    #: each had every channel the other actually used.
-    swept_evidence: dict[str, list[DiscoveredProvider]] = field(default_factory=dict)
+    #: The raw, unmerged providers `collect_clickops` returned for one
+    #: account, before `_fold_in` folds them into the shared, cross-account
+    #: register — one entry per account, positionally aligned with
+    #: `swept_accounts` (index *i* here is that account's own evidence).
+    #: A list, not a dict keyed by account_id: `account_id` is not
+    #: guaranteed unique (two profile-only sweep entries with neither `id`
+    #: nor `role_arn` both fall back to the literal string "unknown
+    #: account"), and a review found that a dict silently drops the first
+    #: such account's evidence under the second's key (R4) — ugly before,
+    #: lossy once this field existed to be keyed at all.
+    #:
+    #: `tfstate.merge_providers` unions `resource_types` and `source_files`
+    #: by provider name across *every* account and channel it is ever
+    #: called with (by design — it is what lets one vendor's evidence from
+    #: two accounts become one row) which also destroys, once merged, which
+    #: channel in which account actually found something. The methodology
+    #: note needs that association kept apart, per account, or two accounts
+    #: sharing one vendor render as if each had every channel the other
+    #: actually used.
+    swept_evidence: list[list[DiscoveredProvider]] = field(default_factory=list)
     #: (account_id, message) for every account named to be swept whose
     #: session could never be established at all — a `boto3.Session` that
     #: failed to construct, or a `role_arn` that could not be assumed. Kept
@@ -947,7 +957,9 @@ def _collect_aws(
                 # state even for an account that is technically "swept" but
                 # refused on every one of them.
                 sources.swept_accounts.append((account_id, account_refusals))
-                sources.swept_evidence[account_id] = list(swept)
+                # Appended in lockstep with `swept_accounts`, never keyed by
+                # `account_id` — see the field's own docstring for why (R4).
+                sources.swept_evidence.append(list(swept))
 
     _apply_vendor_facts(rows, facts)
     return entities
@@ -1107,15 +1119,18 @@ def _perimeter(sources: _Sources, use_gleif: bool, overlay_file: Path | None = N
         # in `_collect_aws`, not reconstructed from `clickops_refused` by
         # string matching. JSON round-trips a tuple as a two-element array.
         "swept_accounts": [(account_id, list(refusals)) for account_id, refusals in sources.swept_accounts],
-        # account_id -> the distinct `resource_types` keys found in that
-        # account's own, unmerged evidence — enough for the methodology note
-        # to say a channel "found something" without shipping raw provider
-        # objects (not JSON-safe: `set`/`Counter` fields) through a dict this
-        # module also feeds straight into `json.dumps`.
-        "swept_evidence": {
-            account_id: sorted({key for provider in providers for key in provider.resource_types})
-            for account_id, providers in sources.swept_evidence.items()
-        },
+        # The distinct `resource_types` keys found in one account's own,
+        # unmerged evidence — enough for the methodology note to say a
+        # channel "found something" without shipping raw provider objects
+        # (not JSON-safe: `set`/`Counter` fields) through a structure this
+        # module also feeds straight into `json.dumps`. A list, positionally
+        # aligned with `swept_accounts` above — never a dict keyed by
+        # account_id, which is not unique (R4; see `swept_evidence`'s own
+        # docstring on `_Sources`).
+        "swept_evidence": [
+            sorted({key for provider in providers for key in provider.resource_types})
+            for providers in sources.swept_evidence
+        ],
         "unreachable_accounts": list(sources.unreachable_accounts),
         "clickops_refused": list(sources.clickops_refused),
         "unnamed_principals": [
@@ -1220,14 +1235,55 @@ def _print_summary(discovered: list[DiscoveredProvider], summary: Any, output: P
     )
 
 
+#: Console label and one-line explanation for each `refusal_kind()` bucket,
+#: in the order printed. Four buckets, never one: a review found the console
+#: printing everything under a single "Refused" heading called a trust-policy
+#: parse failure and an unreached account "refused" — both AWS said nothing
+#: to, and the very `methodology.md` this same run writes says so in as many
+#: words (R2). Labelling them apart here is what keeps the two surfaces from
+#: contradicting each other on the one claim this whole task exists to keep.
+_REFUSAL_HEADINGS: dict[str, tuple[str, str]] = {
+    "denied": ("Refused", "AWS said no to a specific action"),
+    "parse_failure": ("Could not parse", "dora-roi's own failure, not an AWS denial"),
+    "not_reached": ("Named but never reached", "no session could be established"),
+    "not_attempted": ("Never attempted", "no account or region was ever known to try"),
+}
+
+
+def _print_refusals(refused: list[str]) -> None:
+    """Every refusal, grouped by what it actually means, never truncated.
+
+    A fixed cap falsifies `PERIMETER_WARNING`'s own claim that a refusal in
+    scope "is reported above, by name" the moment a run has more refusals
+    than the cap — the same defect shape C2 was, in the same constant, one
+    round later (R3). This tool already commits to declaring the whole
+    perimeter; a long list is the honest cost of that, not a reason to hide
+    part of it.
+    """
+    if not refused:
+        return
+    buckets: dict[str, list[str]] = {key: [] for key in _REFUSAL_HEADINGS}
+    for line in refused:
+        buckets[refusal_kind(line)].append(line)
+    for kind, (label, note) in _REFUSAL_HEADINGS.items():
+        items = buckets[kind]
+        if not items:
+            continue
+        typer.echo("")
+        typer.echo(f"{label} ({len(items)}) — {note}:")
+        for line in items:
+            typer.echo(f"  - {line}")
+
+
 def _print_perimeter(sources: _Sources, gleif: bool) -> None:
     """Golden rule 5: say what was scanned, never imply completeness.
 
     C2: this is the surface every user sees on every run, and `describe()`'s
     per-account counts alone are not enough on it — a run with a refused
     channel must not print only "swept N account(s)" and then a categorical
-    warning next to it. The refused lines themselves get printed here too,
-    not filed away in methodology.md alone.
+    warning next to it. The refusals themselves get printed here too, in
+    full and correctly labelled (see `_print_refusals`), not filed away in
+    methodology.md alone.
     """
     typer.echo("")
     typer.echo("Scanned:")
@@ -1235,16 +1291,7 @@ def _print_perimeter(sources: _Sources, gleif: bool) -> None:
         typer.echo(f"  - {line}")
     typer.echo(f"  - GLEIF enrichment: {'on' if gleif else 'off'}")
 
-    refused = sources.clickops_refused
-    if refused:
-        typer.echo("")
-        typer.echo(f"Refused ({len(refused)}) — not read, and not empty either; see methodology.md for exactly")
-        typer.echo("which account and channel:")
-        shown, remainder = refused[:5], len(refused) - 5
-        for line in shown:
-            typer.echo(f"  - {line}")
-        if remainder > 0:
-            typer.echo(f"  - ... and {remainder} more")
+    _print_refusals(sources.clickops_refused)
 
     typer.echo("")
     typer.echo(PERIMETER_WARNING)

@@ -1122,6 +1122,76 @@ class TestAwsSweepAccounting:
             ("444455556666", ["444455556666 iam-idp: iam:ListSAMLProviders denied (ClientError: AccessDenied)"])
         ]
 
+    def test_two_profile_only_accounts_keep_separate_evidence_despite_both_being_unknown(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """R4: a sweep entry with neither `id` nor `role_arn` falls back to
+        the literal string "unknown account" — two such entries are still
+        two different AWS accounts, and `swept_evidence` must keep their
+        findings apart. A dict keyed by `account_id` cannot: both entries
+        share that exact key, and the second would silently overwrite the
+        first's evidence."""
+        from collections import Counter
+        from datetime import date
+
+        from dora_roi.cli import _collect_aws, _Sources
+        from dora_roi.collectors.aws import DiscoveredAccount, ExpenseReport, OrganizationInventory
+        from dora_roi.collectors.sources import AwsAccount, AwsSweep
+        from dora_roi.collectors.tfstate import DiscoveredProvider
+
+        org = OrganizationInventory(
+            organization_id="o-x",
+            master_account_id="111122223333",
+            accounts=[
+                DiscoveredAccount(
+                    account_id="111122223333", name="root", email=None, status="ACTIVE", ou_path=("Root",)
+                )
+            ],
+        )
+        monkeypatch.setattr(cli_module, "collect_organization", lambda **k: org)
+        monkeypatch.setattr(
+            cli_module,
+            "collect_annual_expense",
+            lambda **k: ExpenseReport(currency=None, by_service={}, period=(date(2025, 8, 1), date(2026, 8, 1))),
+        )
+        monkeypatch.setattr(cli_module, "collect_marketplace", lambda **k: ([], []))
+
+        def fake_sweep(*, profile: str, refused: list[str], **_: object):
+            if profile == "alpha":
+                provider = DiscoveredProvider(
+                    name="okta",
+                    namespace="aws",
+                    registry="aws-iam-idp",
+                    resource_count=1,
+                    resource_types=Counter({"saml_provider": 1}),
+                    source_files={"aws:iam:unknown account"},
+                )
+            else:
+                provider = DiscoveredProvider(
+                    name="datadog",
+                    namespace="aws",
+                    registry="aws-trust",
+                    resource_count=1,
+                    resource_types=Counter({"assume_role_trust": 1}),
+                    source_files={"aws:iam:unknown account"},
+                )
+            return [provider], []
+
+        monkeypatch.setattr(cli_module, "collect_clickops", fake_sweep)
+
+        sources = _Sources(
+            states=[],
+            aws=True,
+            aws_sweep=AwsSweep(accounts=(AwsAccount(profile="alpha"), AwsAccount(profile="beta"))),
+        )
+
+        _collect_aws([], [], {}, sources)
+
+        assert [account_id for account_id, _ in sources.swept_accounts] == ["unknown account", "unknown account"]
+        assert len(sources.swept_evidence) == 2
+        assert {p.name for p in sources.swept_evidence[0]} == {"okta"}
+        assert {p.name for p in sources.swept_evidence[1]} == {"datadog"}
+
 
 class TestConsolePerimeterSurface:
     """I4: the console surface (`describe()`, `_print_perimeter`,
@@ -1192,6 +1262,56 @@ class TestConsolePerimeterSurface:
         output = capsys.readouterr().out
         assert "Refused" not in output
 
+    def test_print_perimeter_does_not_call_a_parse_failure_a_refusal(self, capsys: pytest.CaptureFixture) -> None:
+        """R2: a trust-policy parse failure is dora-roi's own failure, not
+        AWS refusing anything — labelling it "Refused" on the console would
+        contradict methodology.md, which explains, in the same run, that it
+        is not one."""
+        from dora_roi.cli import _print_perimeter
+
+        sources = self._sweep_sources(
+            swept_accounts=[("111122223333", ["111122223333 trust: unreadable trust policy on role 'Legacy'"])]
+        )
+        sources.clickops_refused.append("111122223333 trust: unreadable trust policy on role 'Legacy'")
+        _print_perimeter(sources, gleif=False)
+        output = capsys.readouterr().out
+        assert "Could not parse (1)" in output
+        assert "not an AWS denial" in output
+        assert "Refused" not in output
+
+    def test_print_perimeter_does_not_call_an_unreached_account_a_refusal(self, capsys: pytest.CaptureFixture) -> None:
+        """R2: an account whose session never came up was never read at all —
+        a different, earlier fact than AWS refusing a call, and methodology.md
+        already keeps the two apart."""
+        from dora_roi.cli import _print_perimeter
+
+        sources = self._sweep_sources(
+            unreachable_accounts=[("555566667777", "no usable credentials (ProfileNotFound: bogus)")]
+        )
+        sources.clickops_refused.append("555566667777: no usable credentials (ProfileNotFound: bogus)")
+        _print_perimeter(sources, gleif=False)
+        output = capsys.readouterr().out
+        assert "Named but never reached (1)" in output
+        assert "Refused" not in output
+
+    def test_print_perimeter_never_truncates_the_refusal_list(self, capsys: pytest.CaptureFixture) -> None:
+        """R3: `PERIMETER_WARNING` claims a refusal in scope "is reported
+        above, by name" — a fixed cap falsifies that claim the moment a run
+        has more refusals than the cap. Six accounts, six denials: every one
+        must reach stdout."""
+        from dora_roi.cli import _print_perimeter
+
+        accounts = [f"1111222233{i:02d}" for i in range(6)]
+        refusals = [f"{account} iam-idp: iam:ListSAMLProviders denied (AccessDenied)" for account in accounts]
+        sources = self._sweep_sources(swept_accounts=[(a, [r]) for a, r in zip(accounts, refusals, strict=True)])
+        sources.clickops_refused.extend(refusals)
+        _print_perimeter(sources, gleif=False)
+        output = capsys.readouterr().out
+        assert f"Refused ({len(refusals)})" in output
+        for refusal in refusals:
+            assert refusal in output
+        assert "... and" not in output
+
     def test_perimeter_warning_does_not_claim_every_account_was_read_cleanly(self) -> None:
         """C2: the constant itself must hold even when printed alone — it
         must not assert every named account was read, only that nothing
@@ -1238,11 +1358,14 @@ class TestConsolePerimeterSurface:
 
         result = runner.invoke(app, ["scan", "-o", str(tmp_path), "--aws", "--sources", str(sources_file)])
         assert result.exit_code == 0, result.output
-        # Two refusals reach stdout: the per-account denial this test injects,
-        # and the pre-existing global "no regions known" one — no state file
-        # is given here, so EventBridge never learns a region either. Both
-        # belong on the console, not only in methodology.md.
-        assert "Refused (2)" in result.output
+        # Two refusals reach stdout, in two different buckets: the per-account
+        # denial this test injects (a genuine AWS refusal), and the
+        # pre-existing global "no regions known" one — no state file is given
+        # here, so EventBridge never learns a region either. Never-attempted
+        # must not be relabelled "Refused" (R2) — both belong on the console
+        # regardless, not only in methodology.md.
+        assert "Refused (1)" in result.output
+        assert "Never attempted (1)" in result.output
         assert "444455556666 iam-idp: iam:ListSAMLProviders denied" in result.output
         assert "with at least one channel refused" in result.output
 

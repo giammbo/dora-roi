@@ -29,8 +29,8 @@ WHEN = datetime(2026, 3, 31, 9, 0, tzinfo=UTC)
 
 def _perimeter(
     *,
-    swept: dict[str, list[str]] | None = None,
-    evidence: dict[str, list[str]] | None = None,
+    swept: list[tuple[str, list[str]]] | None = None,
+    evidence: list[list[str]] | None = None,
     unreachable: list[tuple[str, str]] | None = None,
     unnamed: list[tuple[str, str, bool]] | None = None,
     global_refused: list[str] | None = None,
@@ -39,20 +39,22 @@ def _perimeter(
     """The perimeter dict in the exact shape `to_markdown` receives from the CLI's
     own `_perimeter()` in `cli.py`.
 
-    `swept` maps account id -> the raw refusal lines recorded during that
-    account's own sweep (matching `_Sources.swept_accounts`'s tuple shape,
-    keyed by identity rather than reconstructed from text — see the fix-round
-    review's C1/C3 findings). `evidence` maps account id -> the
-    `resource_types` keys its own unmerged evidence carried (`swept_evidence`
-    in cli.py). `unreachable` and `global_refused` mirror
-    `_Sources.unreachable_accounts` and the whole-run `clickops_refused` list
-    respectively.
+    `swept` is a list of (account_id, refusal lines recorded during that
+    account's own sweep) — a list, not a dict, on purpose: `account_id` is
+    not guaranteed unique (two profile-only sweep entries both collapse to
+    the literal string "unknown account"), and a round of review found that
+    keying evidence by it silently drops one account's findings under the
+    other's (R4). `evidence` is positionally aligned with `swept` — the
+    `resource_types` keys account *i*'s own unmerged evidence carried
+    (`swept_evidence` in cli.py, also a list for the same reason).
+    `unreachable` and `global_refused` mirror `_Sources.unreachable_accounts`
+    and the whole-run `clickops_refused` list respectively.
     """
-    swept = swept or {}
+    swept = swept or []
     unreachable = unreachable or []
     perimeter = dict(PERIMETER)
-    perimeter["swept_accounts"] = [(account_id, list(refusals)) for account_id, refusals in swept.items()]
-    perimeter["swept_evidence"] = {account_id: list(keys) for account_id, keys in (evidence or {}).items()}
+    perimeter["swept_accounts"] = [(account_id, list(refusals)) for account_id, refusals in swept]
+    perimeter["swept_evidence"] = [list(keys) for keys in (evidence or [])]
     perimeter["unreachable_accounts"] = list(unreachable)
     perimeter["unnamed_principals"] = list(unnamed or [])
     perimeter["clickops_refused"] = list(global_refused or [])
@@ -270,13 +272,35 @@ class TestTheHonestySurface:
     by a `role_arn` (C1) and conflated evidence across accounts sharing one
     vendor (C3). Accounts are now identified by construction — see
     `_perimeter`'s `swept`/`evidence` parameters — never reconstructed.
+
+    Fix round 2 (a further review): a residual (unattributed) refusal
+    disclosed itself without withdrawing the positive claim standing next to
+    it (R1); the console labelled a parse failure and an unreached account
+    "Refused" while methodology.md explains neither is one (R2); a fixed
+    five-line cap falsified `PERIMETER_WARNING`'s own claim (R3);
+    `swept_evidence` keyed by `account_id` silently dropped one account's
+    findings under another's when both fell back to "unknown account" (R4);
+    and a single denied `list_*` call failed the whole identity-providers
+    channel even when the other list call succeeded and found a vendor (R5).
+    `swept`/`evidence` are lists now, not dicts, precisely so a duplicate
+    account id can be represented and tested (R4).
     """
 
     def test_an_empty_channel_and_a_refused_channel_do_not_read_the_same(self) -> None:
-        read = to_markdown([], _perimeter(swept={"111122223333": []}), [])
+        read = to_markdown([], _perimeter(swept=[("111122223333", [])]), [])
         denied = to_markdown(
             [],
-            _perimeter(swept={"111122223333": ["111122223333 iam-idp: iam:ListSAMLProviders denied"]}),
+            _perimeter(
+                swept=[
+                    (
+                        "111122223333",
+                        [
+                            "111122223333 iam-idp: iam:ListSAMLProviders denied (ClientError: AccessDenied)",
+                            "111122223333 iam-idp: iam:ListOpenIDConnectProviders denied (ClientError: AccessDenied)",
+                        ],
+                    )
+                ]
+            ),
             [],
         )
         assert read != denied
@@ -294,7 +318,7 @@ class TestTheHonestySurface:
     def test_an_unnamed_external_principal_is_stated_not_hidden(self) -> None:
         note = to_markdown(
             [],
-            _perimeter(swept={"111122223333": []}, unnamed=[("999988887777", "MysteryRole", True)]),
+            _perimeter(swept=[("111122223333", [])], unnamed=[("999988887777", "MysteryRole", True)]),
             [],
         )
         assert "999988887777" in note
@@ -328,7 +352,7 @@ class TestTheHonestySurface:
         body = to_markdown(
             [],
             _perimeter(
-                swept={"111122223333": []},
+                swept=[("111122223333", [])],
                 global_refused=["eventbridge: no regions known (no state file or cluster named one)"],
             ),
             [],
@@ -341,11 +365,12 @@ class TestTheHonestySurface:
         body = to_markdown(
             [],
             _perimeter(
-                swept={
-                    "111122223333": [
-                        "111122223333/eu-west-1 eventbridge: events:ListEventSources denied (AccessDenied)"
-                    ]
-                }
+                swept=[
+                    (
+                        "111122223333",
+                        ["111122223333/eu-west-1 eventbridge: events:ListEventSources denied (AccessDenied)"],
+                    )
+                ]
             ),
             [],
         )
@@ -363,9 +388,12 @@ class TestTheHonestySurface:
         body = to_markdown(
             [],
             _perimeter(
-                swept={
-                    account_id: [f"{account_id}/eu-west-1 eventbridge: events:ListEventSources denied (AccessDenied)"]
-                }
+                swept=[
+                    (
+                        account_id,
+                        [f"{account_id}/eu-west-1 eventbridge: events:ListEventSources denied (AccessDenied)"],
+                    )
+                ]
             ),
             [],
         )
@@ -409,7 +437,7 @@ class TestTheHonestySurface:
         result' would hide that this account produced real evidence."""
         body = to_markdown(
             [],
-            _perimeter(swept={"111122223333": []}, evidence={"111122223333": ["saml_provider"]}),
+            _perimeter(swept=[("111122223333", [])], evidence=[["saml_provider"]]),
             [],
         )
         assert "Identity providers: read" in body
@@ -424,8 +452,8 @@ class TestTheHonestySurface:
         body = to_markdown(
             [],
             _perimeter(
-                swept={"111122223333": [], "444455556666": []},
-                evidence={"111122223333": ["saml_provider"], "444455556666": ["assume_role_trust"]},
+                swept=[("111122223333", []), ("444455556666", [])],
+                evidence=[["saml_provider"], ["assume_role_trust"]],
             ),
             [],
         )
@@ -437,20 +465,75 @@ class TestTheHonestySurface:
         assert "Cross-account trust: read" in account_b
         assert "Identity providers: read, no result" in account_b
 
-    def test_an_unattributed_refusal_is_shown_not_dropped(self) -> None:
-        """I1: a refusal in a shape this note does not recognise — a fifth
-        channel, a reworded message — must not silently leave its channel
-        defaulted to a false "read, no result"."""
+    def test_two_accounts_that_both_collapse_to_unknown_still_keep_separate_evidence(self) -> None:
+        """R4: two profile-only sweep entries with neither `id` nor
+        `role_arn` both fall back to the literal string "unknown account" —
+        `account_id` is not unique. Evidence keyed by that string in a dict
+        would let the second account's findings silently overwrite the
+        first's; a list positionally aligned with `swept_accounts` cannot
+        collide this way, so both blocks must keep their own findings."""
         body = to_markdown(
             [],
-            _perimeter(swept={"111122223333": ["111122223333 config-rules: config:DescribeConfigRules denied"]}),
+            _perimeter(
+                swept=[("unknown account", []), ("unknown account", [])],
+                evidence=[["saml_provider"], ["assume_role_trust"]],
+            ),
+            [],
+        )
+        accounts = body.split("## Accounts swept", 1)[1].split("## External", 1)[0]
+        first, second = accounts.split("**unknown account**")[1:3]
+        assert "Identity providers: read" in first
+        assert "Cross-account trust: read, no result" in first
+        assert "Cross-account trust: read" in second
+        assert "Identity providers: read, no result" in second
+
+    def test_an_unattributed_refusal_is_shown_not_dropped(self) -> None:
+        """I1/R1: a refusal in a shape this note does not recognise — a fifth
+        channel, a reworded message — must not silently leave its channel
+        defaulted to a false "read, no result". A review found the first cut
+        of this fix disclosed the refusal *and* still made the positive claim
+        three lines above it — not two facts side by side, a contradiction.
+        Every channel line for this account must withdraw its clean claim
+        instead."""
+        body = to_markdown(
+            [],
+            _perimeter(swept=[("111122223333", ["111122223333 config-rules: config:DescribeConfigRules denied"])]),
             [],
         )
         assert "config:DescribeConfigRules denied" in body
         assert "could not attribute to a channel" in body.lower()
-        # The three known channels still default cleanly for this account —
-        # the residual entry must not make them disappear or misrender.
-        assert "Identity providers: read, no result" in body
+        # R1: none of the three channels may make the bare positive claim
+        # anymore — the unattributed refusal might belong to any of them.
+        assert "Identity providers: read, no result" not in body
+        assert "Cross-account trust: read, no result" not in body
+        assert "Partner event sources: read, no result" not in body
+        assert body.count("unconfirmed —") == 3
+
+    def test_an_unattributed_refusal_does_not_overwrite_a_channels_own_known_state(self) -> None:
+        """R1's fix must not overreach: a channel that already carries its
+        own refused/partial state says something concrete already happened,
+        and is not the line the unattributed refusal could be hiding behind."""
+        body = to_markdown(
+            [],
+            _perimeter(
+                swept=[
+                    (
+                        "111122223333",
+                        [
+                            "111122223333 trust: iam:ListRoles denied (AccessDenied)",
+                            "111122223333 config-rules: config:DescribeConfigRules denied",
+                        ],
+                    )
+                ]
+            ),
+            [],
+        )
+        assert "Cross-account trust: refused — iam:ListRoles denied" in body
+        assert "Cross-account trust: unconfirmed" not in body
+        # The other two channels have no refusal of their own, so they do get
+        # withdrawn — only the one with its own known state is left alone.
+        assert "Identity providers: unconfirmed" in body
+        assert "Partner event sources: unconfirmed" in body
 
     def test_a_per_item_idp_denial_does_not_fail_the_whole_channel(self) -> None:
         """I2: `GetSAMLProvider` denied on one already-listed ARN, after
@@ -460,19 +543,65 @@ class TestTheHonestySurface:
         body = to_markdown(
             [],
             _perimeter(
-                swept={
-                    "111122223333": [
-                        "111122223333 iam-idp: iam:GetSAMLProvider on "
-                        "arn:aws:iam::111122223333:saml-provider/okta (ClientError: AccessDenied)"
-                    ]
-                },
-                evidence={"111122223333": ["saml_provider"]},
+                swept=[
+                    (
+                        "111122223333",
+                        [
+                            "111122223333 iam-idp: iam:GetSAMLProvider on "
+                            "arn:aws:iam::111122223333:saml-provider/okta (ClientError: AccessDenied)"
+                        ],
+                    )
+                ],
+                evidence=[["saml_provider"]],
             ),
             [],
         )
         assert "Identity providers: refused" not in body
-        assert "Identity providers: read, but could not retrieve 1 provider document" in body
+        assert "Identity providers: read, but could not fully enumerate this account's identity providers" in body
         assert "GetSAMLProvider" in body
+
+    def test_one_list_call_denied_while_the_other_succeeds_is_not_a_whole_channel_refusal(self) -> None:
+        """R5: I2's own defect, one call pair over. `ListSAMLProviders`
+        denied while `ListOpenIDConnectProviders` succeeded — and found a
+        vendor — must not render the whole "Identity providers" channel a
+        refusal next to the register row that surviving call produced."""
+        body = to_markdown(
+            [],
+            _perimeter(
+                swept=[
+                    (
+                        "111122223333",
+                        ["111122223333 iam-idp: iam:ListSAMLProviders denied (ClientError: AccessDenied)"],
+                    )
+                ],
+                evidence=[["oidc_provider"]],
+            ),
+            [],
+        )
+        assert "Identity providers: refused" not in body
+        assert "Identity providers: read, but could not fully enumerate this account's identity providers" in body
+        assert "ListSAMLProviders denied" in body
+
+    def test_both_list_calls_denied_is_a_genuine_whole_channel_refusal(self) -> None:
+        """The R5 fix must not blur the other direction: both list calls
+        denied really did fail the whole channel, and must still say so."""
+        body = to_markdown(
+            [],
+            _perimeter(
+                swept=[
+                    (
+                        "111122223333",
+                        [
+                            "111122223333 iam-idp: iam:ListSAMLProviders denied (AccessDenied)",
+                            "111122223333 iam-idp: iam:ListOpenIDConnectProviders denied (AccessDenied)",
+                        ],
+                    )
+                ]
+            ),
+            [],
+        )
+        assert "Identity providers: refused" in body
+        assert "could not fully enumerate" not in body
 
     def test_an_unparseable_trust_policy_is_not_called_an_aws_refusal(self) -> None:
         """I2: "unreadable trust policy on role 'X'" is dora-roi's own parse
@@ -481,7 +610,7 @@ class TestTheHonestySurface:
         parse failure that way asserts something that did not happen."""
         body = to_markdown(
             [],
-            _perimeter(swept={"111122223333": ["111122223333 trust: unreadable trust policy on role 'Legacy'"]}),
+            _perimeter(swept=[("111122223333", ["111122223333 trust: unreadable trust policy on role 'Legacy'"])]),
             [],
         )
         assert "Cross-account trust: refused" not in body
@@ -494,7 +623,47 @@ class TestTheHonestySurface:
         denied is a genuine, whole-channel AWS refusal."""
         body = to_markdown(
             [],
-            _perimeter(swept={"111122223333": ["111122223333 trust: iam:ListRoles denied (AccessDenied)"]}),
+            _perimeter(swept=[("111122223333", ["111122223333 trust: iam:ListRoles denied (AccessDenied)"])]),
             [],
         )
         assert "Cross-account trust: refused — iam:ListRoles denied" in body
+
+
+class TestRefusalKind:
+    """`refusal_kind` is the one place both the console (`cli._print_perimeter`)
+    and this module classify a `clickops_refused` line — a review found the
+    two surfaces disagreeing (R2) when each grew its own copy of this logic."""
+
+    def test_no_usable_credentials_is_not_reached_not_refused(self) -> None:
+        from dora_roi.report.methodology import refusal_kind
+
+        assert refusal_kind("555566667777: no usable credentials (ProfileNotFound: bogus)") == "not_reached"
+
+    def test_unreadable_trust_policy_is_a_parse_failure_not_refused(self) -> None:
+        from dora_roi.report.methodology import refusal_kind
+
+        assert refusal_kind("111122223333 trust: unreadable trust policy on role 'Legacy'") == "parse_failure"
+
+    def test_no_regions_known_is_not_attempted_not_refused(self) -> None:
+        from dora_roi.report.methodology import refusal_kind
+
+        line = (
+            "eventbridge: no regions known (no state file or cluster named one), so partner event "
+            "sources were not swept in any account."
+        )
+        assert refusal_kind(line) == "not_attempted"
+
+    def test_assume_role_name_unresolved_is_not_attempted_not_refused(self) -> None:
+        from dora_roi.report.methodology import refusal_kind
+
+        line = (
+            "aws sweep: assume_role_name is set but AWS Organizations was unreachable, so there is no "
+            "account list to assume it into."
+        )
+        assert refusal_kind(line) == "not_attempted"
+
+    def test_a_genuine_aws_denial_is_denied(self) -> None:
+        from dora_roi.report.methodology import refusal_kind
+
+        assert refusal_kind("111122223333 iam-idp: iam:ListSAMLProviders denied (AccessDenied)") == "denied"
+        assert refusal_kind("cost explorer: NoCredentialsError: Unable to locate credentials") == "denied"
