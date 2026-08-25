@@ -372,3 +372,33 @@ class TestAwsSweep:
     def test_an_aws_block_that_is_all_comments_is_not_a_sweep(self, tmp_path: Path) -> None:
         """`aws:` with everything commented out parses as None, not as a dict."""
         assert load_aws_sweep(self._write(tmp_path, "aws:\n  # profile: management\n")) is None
+
+    def test_a_scalar_accounts_value_is_refused_not_iterated(self, tmp_path: Path) -> None:
+        """`accounts: 5` is truthy and non-iterable — `for entry in 5` must not reach Python."""
+        with pytest.raises(SourceError, match="aws.accounts.*must be a list"):
+            load_aws_sweep(self._write(tmp_path, "aws:\n  accounts: 5\n"))
+
+    def test_a_non_mapping_account_entry_is_refused(self, tmp_path: Path) -> None:
+        with pytest.raises(SourceError, match="entry 1 must be a mapping"):
+            load_aws_sweep(self._write(tmp_path, "aws:\n  accounts:\n    - not-a-mapping\n"))
+
+    def test_an_unknown_key_inside_one_account_names_that_account(self, tmp_path: Path) -> None:
+        """Five accounts, a typo on the third: the error has to say which one."""
+        sweep_yaml = (
+            "aws:\n"
+            "  accounts:\n"
+            '    - id: "1"\n'
+            "      profile: a\n"
+            '    - id: "2"\n'
+            "      role_arnn: arn:aws:iam::2:role/ro\n"
+        )
+        with pytest.raises(SourceError, match=r"entry 2 \(id 2\)") as excinfo:
+            load_aws_sweep(self._write(tmp_path, sweep_yaml))
+        assert "role_arnn" in str(excinfo.value)
+
+    def test_an_account_id_survives_as_a_string_not_an_int(self, tmp_path: Path) -> None:
+        """An unquoted 12-digit id parses as `int` in YAML; it must not leak past the loader."""
+        sweep = load_aws_sweep(self._write(tmp_path, "aws:\n  accounts:\n    - id: 111122223333\n      profile: p\n"))
+        assert sweep is not None
+        assert sweep.accounts[0].id == "111122223333"
+        assert isinstance(sweep.accounts[0].id, str)

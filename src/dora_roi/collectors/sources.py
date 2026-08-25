@@ -183,19 +183,35 @@ def load_aws_sweep(path: str | Path) -> AwsSweep | None:
     if unknown:
         raise SourceError(f"unknown key(s) under `aws:` in {path}: {', '.join(sorted(unknown))}")
 
+    raw_accounts = block.get("accounts")
+    if raw_accounts is None:
+        raw_accounts = []
+    elif not isinstance(raw_accounts, list):
+        raise SourceError(f"{path}: `aws.accounts` must be a list, got {type(raw_accounts).__name__}.")
+
     accounts: list[AwsAccount] = []
-    for entry in block.get("accounts") or []:
+    for position, entry in enumerate(raw_accounts, start=1):
         if not isinstance(entry, dict):
-            raise SourceError(f"each entry under `aws.accounts` must be a mapping, got {entry!r}")
+            raise SourceError(f"{path}: aws.accounts entry {position} must be a mapping, got {entry!r}.")
         strange = set(entry) - _ACCOUNT_KEYS
         if strange:
-            raise SourceError(f"unknown key(s) under `aws.accounts` in {path}: {', '.join(sorted(strange))}")
+            raise SourceError(
+                f"{path}: aws.accounts entry {position} (id {entry.get('id', '?')}) has unknown key(s) "
+                f"{', '.join(sorted(strange))}."
+            )
         if not entry.get("profile") and not entry.get("role_arn"):
             raise SourceError(
                 f"account {entry.get('id', '?')} in {path} has neither `profile` nor `role_arn`: "
                 f"dora-roi will not guess which credentials to read an account with."
             )
-        accounts.append(AwsAccount(id=entry.get("id"), profile=entry.get("profile"), role_arn=entry.get("role_arn")))
+        raw_id = entry.get("id")
+        accounts.append(
+            AwsAccount(
+                id=str(raw_id) if raw_id is not None else None,
+                profile=entry.get("profile"),
+                role_arn=entry.get("role_arn"),
+            )
+        )
 
     return AwsSweep(
         profile=block.get("profile"),
