@@ -86,11 +86,13 @@ DISCLAIMER = (
     "it reaches a filing."
 )
 PERIMETER_WARNING = (
-    "Every channel and account named above was read; nothing beyond them was. A vendor that leaves no "
-    "trace in any of them — a SaaS bought on a card, a contract with no infrastructure footprint at "
-    "all — is exactly as invisible to this tool as it always was: discovering more here changes how "
-    "much of the visible estate this tool can read, not the size of what it cannot. This register does "
-    "not claim to be complete."
+    "The channels and accounts named above are the whole of this run's scope; nothing outside them was "
+    "attempted. Being in scope is not the same as having been read cleanly — a refusal inside that scope "
+    "is reported above, by name, never folded silently into a clean read. A vendor that leaves no trace "
+    "anywhere in scope — a SaaS bought on a card, a contract with no infrastructure footprint at all — "
+    "is exactly as invisible to this tool as it always was: discovering more here changes how much of "
+    "the visible estate this tool can read, not the size of what it cannot. This register does not "
+    "claim to be complete."
 )
 
 console = Console()
@@ -463,15 +465,44 @@ class _Sources:
 
     #: What the vendor-discovery channels said no to: a bad profile, an
     #: unassumable role, a denied IAM or Cost Explorer call. Task 8 renders
-    #: this in the methodology note the same way `excluded` already is.
+    #: this in the methodology note the same way `excluded` already is. Kept
+    #: around even now that `swept_accounts`/`unreachable_accounts` carry the
+    #: per-account facts, because the *global* refusals — Cost Explorer,
+    #: Marketplace, `assume_role_name` never resolving to an account, no
+    #: region ever known for EventBridge — belong to no single account.
     clickops_refused: list[str] = field(default_factory=list)
     #: External AWS accounts with standing access (a trust policy naming them)
     #: that no table could name as a vendor. Task 8 raises this as a finding.
     unnamed_principals: list[ExternalPrincipal] = field(default_factory=list)
-    #: Accounts the per-account channels actually swept, for the perimeter
-    #: statement: an account this run never reached must not read as one with
-    #: nothing in it.
-    swept_accounts: list[str] = field(default_factory=list)
+    #: (account_id, refusals recorded during that one account's own sweep),
+    #: for every account a session was actually usable for. The refusal list
+    #: is `sources.clickops_refused[before:after]` for that account's own
+    #: `collect_clickops` call — captured by identity, never reconstructed
+    #: from the flat `clickops_refused` list by parsing an account id back out
+    #: of a message string. A review of the first cut of this field found
+    #: exactly why that reconstruction cannot be trusted: an account keyed by
+    #: a `role_arn` contains a `/`, and the EventBridge refusal format packs
+    #: `<account>/<region>` into one field, so splitting on the first `/`
+    #: silently misfiled the refusal under the wrong account and rendered a
+    #: denied call as a clean empty result.
+    swept_accounts: list[tuple[str, list[str]]] = field(default_factory=list)
+    #: account_id -> the raw, unmerged providers `collect_clickops` returned
+    #: for that one account, before `_fold_in` folds them into the shared,
+    #: cross-account register. `tfstate.merge_providers` unions
+    #: `resource_types` and `source_files` by provider name across *every*
+    #: account and channel it is ever called with (by design — it is what
+    #: lets one vendor's evidence from two accounts become one row) which
+    #: also destroys, once merged, which channel in which account actually
+    #: found something. The methodology note needs that association kept
+    #: apart, per account, or two accounts sharing one vendor render as if
+    #: each had every channel the other actually used.
+    swept_evidence: dict[str, list[DiscoveredProvider]] = field(default_factory=dict)
+    #: (account_id, message) for every account named to be swept whose
+    #: session could never be established at all — a `boto3.Session` that
+    #: failed to construct, or a `role_arn` that could not be assumed. Kept
+    #: apart from `swept_accounts`: that account was never reached, which is
+    #: a different, earlier fact than being reached and refused on a channel.
+    unreachable_accounts: list[tuple[str, str]] = field(default_factory=list)
 
     def any(self) -> bool:
         return bool(self.states) or bool(self.remote) or self.aws or self.k8s
@@ -504,12 +535,30 @@ class _Sources:
             # with no `--sources` file runs Marketplace alone, and this line
             # is what stops that reading as "every AWS channel was swept".
             if self.aws_sweep is not None:
-                lines.append(f"AWS click-ops discovery: swept {len(self.swept_accounts)} account(s)")
+                lines.append(self._click_ops_discovery_line())
             else:
                 lines.append("AWS click-ops discovery: not swept (no --sources aws: block given)")
         if self.k8s:
             lines.append(f"Kubernetes (context: {self.k8s_context or 'current'})")
         return lines
+
+    def _click_ops_discovery_line(self) -> str:
+        """C2: "swept N account(s)" alone reads as "N accounts read cleanly" —
+        it said nothing about `swept_accounts` entries that were refused on
+        every channel, or accounts named to sweep that were never reached at
+        all. Both belong on the terminal, not only in methodology.md, because
+        this line is the one every user sees on every run.
+        """
+        refused_count = sum(1 for _, refusals in self.swept_accounts if refusals)
+        base = f"AWS click-ops discovery: swept {len(self.swept_accounts)} account(s)"
+        caveats = []
+        if refused_count:
+            caveats.append(f"{refused_count} with at least one channel refused")
+        if self.unreachable_accounts:
+            caveats.append(f"{len(self.unreachable_accounts)} named but never reached")
+        if not caveats:
+            return base
+        return f"{base} ({'; '.join(caveats)} — see methodology.md)"
 
 
 def _scan(
@@ -855,9 +904,12 @@ def _collect_aws(
             )
         for sweep_account in accounts:
             account_id = sweep_account.id or sweep_account.role_arn or "unknown account"
-            # `collect_clickops` never raises, so the only way to learn a
-            # session could not even be created for this account is to look
-            # for the specific refusal it appends on that path.
+            # `collect_clickops` never raises; the only way to learn a session
+            # could not even be created for this account is to look for the
+            # specific refusal it appends on that path. `before`/`after` slices
+            # `clickops_refused` to exactly the messages this one call
+            # produced — the per-account refusal set, by construction, with
+            # nothing to reconstruct from a string afterwards.
             before = len(sources.clickops_refused)
             swept, unknown = collect_clickops(
                 profile=sweep_account.profile or sweep.profile,
@@ -867,31 +919,35 @@ def _collect_aws(
                 regions=regions,
                 refused=sources.clickops_refused,
             )
+            account_refusals = sources.clickops_refused[before:]
             _fold_in(discovered, rows, mapping, swept)
             sources.unnamed_principals.extend(unknown)
-            session_failed = any(
-                entry.startswith(f"{account_id}: no usable credentials") for entry in sources.clickops_refused[before:]
+            session_failure = next(
+                (entry for entry in account_refusals if entry.startswith(f"{account_id}: no usable credentials")),
+                None,
             )
-            # An account whose session never came up was not reached, and
-            # must not read as one that was reached and simply had nothing —
-            # `swept_accounts`'s own docstring states this requirement.
-            #
-            # This still cannot catch every dead-credentials case: a plain
-            # profile (no `role_arn`) makes `boto3.Session(...)` succeed even
-            # when its credentials are expired or absent, because boto3 never
-            # validates them until the first call. That call then fails
-            # inside each channel instead of inside `_session()`, so it
-            # surfaces here as three ordinary per-channel refusals (`iam-idp:`,
-            # `trust:`, `eventbridge:`) rather than one `no usable credentials`
-            # one, and this account is still appended below. The methodology
-            # note is what keeps that honest: it renders each channel's state
-            # from `clickops_refused` directly, never from membership in this
-            # list alone, so an account that is "swept" but refused on every
-            # channel still shows `refused` three times over, never a false
-            # `read, no result` — see `report/methodology.py`'s
-            # `_accounts_swept_section`.
-            if not session_failed:
-                sources.swept_accounts.append(account_id)
+            if session_failure is not None:
+                # The session never came up at all: this account was not
+                # reached, and must not read as one that was reached and
+                # simply had nothing — `unreachable_accounts`'s own docstring
+                # states this requirement. Recorded by identity, keyed off the
+                # exact `account_id` this call used, never by re-parsing it
+                # out of the message afterwards.
+                sources.unreachable_accounts.append((account_id, session_failure[len(f"{account_id}: ") :]))
+            else:
+                # Reached, whether or not every channel inside it succeeded —
+                # a bad profile with dead-but-present credentials (no
+                # `role_arn`, so `boto3.Session()` never validates them until
+                # the first call) can still make every channel below fail, but
+                # each failure is then a per-channel refusal in
+                # `account_refusals`, not a session-level one. Recording the
+                # refusal list keyed by this exact `account_id` — never a
+                # value reconstructed by splitting the refusal text — is what
+                # lets the methodology note render each channel's own true
+                # state even for an account that is technically "swept" but
+                # refused on every one of them.
+                sources.swept_accounts.append((account_id, account_refusals))
+                sources.swept_evidence[account_id] = list(swept)
 
     _apply_vendor_facts(rows, facts)
     return entities
@@ -1047,7 +1103,20 @@ def _perimeter(sources: _Sources, use_gleif: bool, overlay_file: Path | None = N
         "kubernetes": sources.k8s_context or sources.k8s,
         "gleif": use_gleif,
         "overlay": str(overlay_file) if overlay_file else None,
-        "swept_accounts": list(sources.swept_accounts),
+        # (account_id, [refusal, ...]) — the exact per-account slice recorded
+        # in `_collect_aws`, not reconstructed from `clickops_refused` by
+        # string matching. JSON round-trips a tuple as a two-element array.
+        "swept_accounts": [(account_id, list(refusals)) for account_id, refusals in sources.swept_accounts],
+        # account_id -> the distinct `resource_types` keys found in that
+        # account's own, unmerged evidence — enough for the methodology note
+        # to say a channel "found something" without shipping raw provider
+        # objects (not JSON-safe: `set`/`Counter` fields) through a dict this
+        # module also feeds straight into `json.dumps`.
+        "swept_evidence": {
+            account_id: sorted({key for provider in providers for key in provider.resource_types})
+            for account_id, providers in sources.swept_evidence.items()
+        },
+        "unreachable_accounts": list(sources.unreachable_accounts),
         "clickops_refused": list(sources.clickops_refused),
         "unnamed_principals": [
             (principal.account_id, principal.role_name, principal.has_external_id)
@@ -1152,12 +1221,31 @@ def _print_summary(discovered: list[DiscoveredProvider], summary: Any, output: P
 
 
 def _print_perimeter(sources: _Sources, gleif: bool) -> None:
-    """Golden rule 5: say what was scanned, never imply completeness."""
+    """Golden rule 5: say what was scanned, never imply completeness.
+
+    C2: this is the surface every user sees on every run, and `describe()`'s
+    per-account counts alone are not enough on it — a run with a refused
+    channel must not print only "swept N account(s)" and then a categorical
+    warning next to it. The refused lines themselves get printed here too,
+    not filed away in methodology.md alone.
+    """
     typer.echo("")
     typer.echo("Scanned:")
     for line in sources.describe():
         typer.echo(f"  - {line}")
     typer.echo(f"  - GLEIF enrichment: {'on' if gleif else 'off'}")
+
+    refused = sources.clickops_refused
+    if refused:
+        typer.echo("")
+        typer.echo(f"Refused ({len(refused)}) — not read, and not empty either; see methodology.md for exactly")
+        typer.echo("which account and channel:")
+        shown, remainder = refused[:5], len(refused) - 5
+        for line in shown:
+            typer.echo(f"  - {line}")
+        if remainder > 0:
+            typer.echo(f"  - ... and {remainder} more")
+
     typer.echo("")
     typer.echo(PERIMETER_WARNING)
 

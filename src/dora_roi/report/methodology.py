@@ -58,119 +58,150 @@ repository and re-checked by the test suite on every run.
 #: `_ACTION_NAME` table is spelled out: this is a small, stable protocol
 #: between that module and this one, and getting a marker subtly wrong here
 #: would silently misfile a refusal under the wrong channel, or under none.
+#: Unlike the first cut of this module, these are only ever matched against a
+#: refusal slice already known to belong to one account — see
+#: `_Sources.swept_accounts` in cli.py — never against the flat, whole-run
+#: `clickops_refused` list. A review found that the flat approach broke for an
+#: account keyed by a `role_arn` (which contains a `/`) once EventBridge
+#: packed `<account>/<region>` ahead of its own marker: the account could no
+#: longer be recovered from the string, so the refusal was misfiled under a
+#: garbled key and the real account silently defaulted to "read, no result".
 _IAM_IDP_MARKER = " iam-idp: "
 _TRUST_MARKER = " trust: "
 _EVENTBRIDGE_MARKER = " eventbridge: "
-_NO_CREDS_MARKER = ": no usable credentials"
 _EVENTBRIDGE_NO_REGIONS_PREFIX = "eventbridge: no regions known"
 _MARKETPLACE_PREFIX = "marketplace: "
 _COST_EXPLORER_PREFIX = "cost explorer: "
 _AWS_SWEEP_PREFIX = "aws sweep: "
 
-#: `resource_types` keys that credit a discovered provider to one specific
-#: per-account channel — see `collectors/clickops.py`'s own `_record` and
-#: `collect_trust_relationships`/`collect_partner_event_sources`. Identity
-#: providers and trust relationships both tag `source_files` with the same
-#: `aws:iam:<account>` string, so the channel a row belongs to is only
-#: recoverable from which of these keys `resource_types` actually holds.
+#: `resource_types` keys that credit one account's own evidence to one
+#: specific channel — see `collectors/clickops.py`'s `_record`,
+#: `collect_trust_relationships` and `collect_partner_event_sources`. Checked
+#: only against `swept_evidence[account_id]` (cli.py's `_perimeter()`), which
+#: is that one account's own unmerged `collect_clickops` result — never
+#: against the shared, merged provider list, which unions `resource_types` by
+#: provider name across every account `merge_providers` is ever called with.
+#: A review (finding C3) found that merge made two accounts sharing one
+#: vendor (say, Okta federating into account A while a role in account B
+#: trusts Okta's own AWS account) render as if each account had used both
+#: channels, which neither did.
 _IDP_FOUND_KEYS = ("saml_provider", "oidc_provider")
 _TRUST_FOUND_KEY = "assume_role_trust"
 _EVENTBRIDGE_FOUND_KEY = "partner_event_source"
 
 
-def _split_on_marker(line: str, marker: str) -> tuple[str, str] | None:
-    """`"<account> <marker>: <message>"` -> `(account, message)`, or `None`."""
-    idx = line.find(marker)
-    if idx == -1:
-        return None
-    return line[:idx], line[idx + len(marker) :]
+def _classify_refusals(account_id: str, refusals: Sequence[str]) -> tuple[list[str], list[str], list[str], list[str]]:
+    """One account's own refusal slice, split into (idp, trust, eventbridge, residual).
 
+    ``refusals`` is already scoped to exactly one account by the caller
+    (``_Sources.swept_accounts`` in cli.py), so no account identity is ever
+    recovered from the text here — only the channel. The one exception is
+    EventBridge, whose message packs ``<account>/<region>`` ahead of its own
+    marker: the region is recovered by stripping the *known* ``account_id``
+    as a literal prefix, never by splitting on the first ``/``, which is
+    exactly what broke for an account keyed by a ``role_arn`` (review finding
+    C1 — a role ARN contains a ``/`` of its own).
 
-def _refusals_by_account(refused: Sequence[str], marker: str) -> dict[str, list[str]]:
-    """`{account_id: [message, ...]}` for every refusal tagged with one channel marker."""
-    out: dict[str, list[str]] = {}
-    for line in refused:
-        split = _split_on_marker(line, marker)
-        if split is None:
-            continue
-        account, message = split
-        out.setdefault(account, []).append(message)
-    return out
-
-
-def _eventbridge_refusals_by_account(refused: Sequence[str]) -> dict[str, list[str]]:
-    """Like :func:`_refusals_by_account`, but the account is `account/region`."""
-    out: dict[str, list[str]] = {}
-    for line in refused:
-        split = _split_on_marker(line, _EVENTBRIDGE_MARKER)
-        if split is None:
-            continue
-        account_region, message = split
-        account, _, region = account_region.partition("/")
-        out.setdefault(account, []).append(f"{region}: {message}" if region else message)
-    return out
-
-
-def _unreachable_accounts(refused: Sequence[str]) -> list[tuple[str, str]]:
-    """Accounts named to be swept whose session could never be established.
-
-    Distinct from a per-channel refusal: a `"no usable credentials"` line
-    means no read-only call was ever attempted for this account at all, so it
-    never entered ``swept_accounts`` in the first place (Task 7's own
-    accounting excludes it). It must not simply vanish from the note because
-    of that exclusion — a reader who sees neither a swept-account entry nor
-    this one would have no way to learn the account was even named.
+    A line matching none of the three markers lands in ``residual`` instead
+    of being dropped — see review finding I1: a fifth channel, or a reworded
+    message, must still surface somewhere, not silently leave its channel's
+    default state (``read, no result``) uncontested.
     """
-    out: list[tuple[str, str]] = []
-    for line in refused:
-        idx = line.find(_NO_CREDS_MARKER)
-        if idx == -1:
-            continue
-        out.append((line[:idx], line[idx + 2 :]))
-    return out
+    idp, trust, eventbridge, residual = [], [], [], []
+    for line in refusals:
+        if _IAM_IDP_MARKER in line:
+            idp.append(line.split(_IAM_IDP_MARKER, 1)[1])
+        elif _TRUST_MARKER in line:
+            trust.append(line.split(_TRUST_MARKER, 1)[1])
+        elif _EVENTBRIDGE_MARKER in line:
+            head, _, message = line.partition(_EVENTBRIDGE_MARKER)
+            prefix = f"{account_id}/"
+            region = head[len(prefix) :] if head.startswith(prefix) else ""
+            eventbridge.append(f"{region}: {message}" if region else message)
+        else:
+            residual.append(line)
+    return idp, trust, eventbridge, residual
 
 
-def _found_by_channel(providers: Sequence[Any], tag_prefix: str, keys: Sequence[str]) -> bool:
-    """Whether any discovered provider carries this account/channel's tag."""
-    for provider in providers:
-        source_files = getattr(provider, "source_files", None) or ()
-        if not any(str(tag).startswith(tag_prefix) for tag in source_files):
-            continue
-        resource_types = getattr(provider, "resource_types", None) or {}
-        if any(key in resource_types for key in keys):
-            return True
-    return False
+def _found(evidence: Sequence[str], keys: Sequence[str]) -> bool:
+    """Whether this account's own evidence carries any of a channel's keys."""
+    return any(key in evidence for key in keys)
 
 
-def _channel_state(label: str, refusals: list[str] | None, found: bool, unavailable: str | None = None) -> str:
-    """One channel, one account, one of three outcomes an auditor can trust.
-
-    ``refused`` and ``read, no result`` arrive from the same empty list in
-    memory and are opposite claims about the world; collapsing them would
-    make this note assert something nobody verified. ``unavailable`` is a
-    fourth, narrower case — the channel was never even attempted, which is
-    neither of the other two and must not be reported as either.
+def _idp_line(refusals: list[str], found: bool) -> str:
+    """Identity providers: a *list* denial costs the whole channel; a *get*
+    denial costs one already-listed provider's document and nothing else.
+    Collapsing the two (review finding I2) would call a channel that partly
+    succeeded — vendors from other providers were still recorded — a total
+    refusal, which the register itself would then contradict.
     """
-    if unavailable:
-        return f"  - {label}: not swept — {unavailable}"
+    whole = [r for r in refusals if "iam:List" in r]
+    partial = [r for r in refusals if r not in whole]
+    if whole:
+        return f"  - Identity providers: refused — {'; '.join(whole)}"
+    if partial:
+        return (
+            f"  - Identity providers: read, but could not retrieve {len(partial)} provider "
+            f"document(s) — {'; '.join(partial)}"
+        )
+    return f"  - Identity providers: {'read' if found else 'read, no result'}"
+
+
+def _trust_line(refusals: list[str], found: bool) -> str:
+    """Cross-account trust: `iam:ListRoles` denied is AWS refusing the whole
+    channel. A trust policy dora-roi could not parse on one role is *this
+    tool's own* failure, not AWS saying no — the section defines *refused* as
+    "AWS said no to a specific action", and labelling a parse failure that
+    way would assert something that did not happen (review finding I2).
+    """
+    whole = [r for r in refusals if "iam:ListRoles" in r]
+    unparseable = [r for r in refusals if r not in whole]
+    if whole:
+        return f"  - Cross-account trust: refused — {'; '.join(whole)}"
+    if unparseable:
+        return (
+            f"  - Cross-account trust: read, but could not parse {len(unparseable)} role's own trust "
+            f"policy — dora-roi's own parse failure, not an AWS denial — {'; '.join(unparseable)}"
+        )
+    return f"  - Cross-account trust: {'read' if found else 'read, no result'}"
+
+
+def _eventbridge_line(refusals: list[str], found: bool, no_regions_known: bool) -> str:
+    """Partner event sources: one call type, so no partial/whole split applies.
+
+    ``no_regions_known`` is a fourth, narrower state — the channel was never
+    even attempted because no state file or cluster ever named a region —
+    which is neither a clean read nor a refusal and must not be reported as
+    either.
+    """
     if refusals:
-        return f"  - {label}: refused — {'; '.join(refusals)}"
-    if found:
-        return f"  - {label}: read"
-    return f"  - {label}: read, no result"
+        return f"  - Partner event sources: refused — {'; '.join(refusals)}"
+    if no_regions_known:
+        return (
+            "  - Partner event sources: not swept — no region was known to sweep (no state file or cluster named one)"
+        )
+    return f"  - Partner event sources: {'read' if found else 'read, no result'}"
 
 
-def _accounts_swept_section(perimeter: dict[str, Any], providers: Sequence[Any]) -> list[str]:
+def _accounts_swept_section(perimeter: dict[str, Any]) -> list[str]:
     """Golden rule 5, applied to the four click-ops channels: never let a
     reader conclude an account or a channel was read when it was refused, or
     was read at all when nothing named it to sweep in the first place.
     """
-    swept_accounts: list[str] = list(perimeter.get("swept_accounts") or [])
-    clickops_refused: list[str] = list(perimeter.get("clickops_refused") or [])
+    swept_accounts: list[tuple[str, list[str]]] = [
+        (account_id, list(refusals)) for account_id, refusals in (perimeter.get("swept_accounts") or [])
+    ]
+    swept_evidence: dict[str, list[str]] = {
+        account_id: list(keys) for account_id, keys in (perimeter.get("swept_evidence") or {}).items()
+    }
+    unreachable_accounts: list[tuple[str, str]] = [
+        (account_id, message) for account_id, message in (perimeter.get("unreachable_accounts") or [])
+    ]
     unnamed_principals: list[Any] = list(perimeter.get("unnamed_principals") or [])
+    clickops_refused: list[str] = list(perimeter.get("clickops_refused") or [])
     aws_sweep_configured = bool(perimeter.get("aws_sweep_configured"))
 
-    if not (swept_accounts or clickops_refused or unnamed_principals):
+    if not (swept_accounts or unreachable_accounts or unnamed_principals or aws_sweep_configured):
         return []
 
     out = [
@@ -183,45 +214,26 @@ def _accounts_swept_section(perimeter: dict[str, Any], providers: Sequence[Any])
         "found something), **read, no result** (the call succeeded and found nothing), "
         "and **refused** (AWS said no to a specific action, named below). The middle one "
         "and the last one arrive as the same empty list and are opposite claims about "
-        "the world — this note is the one place they are told apart.",
+        "the world — this note is the one place they are told apart. A single provider's "
+        "document dora-roi could not retrieve, or a single role's trust policy it could not "
+        "parse, does not fail the whole channel either — both are called out on their own, "
+        "distinctly from an AWS denial.",
         "",
     ]
 
-    idp_refusals = _refusals_by_account(clickops_refused, _IAM_IDP_MARKER)
-    trust_refusals = _refusals_by_account(clickops_refused, _TRUST_MARKER)
-    eventbridge_refusals = _eventbridge_refusals_by_account(clickops_refused)
     no_regions_known = any(line.startswith(_EVENTBRIDGE_NO_REGIONS_PREFIX) for line in clickops_refused)
+    residual_by_account: list[tuple[str, str]] = []
 
     if swept_accounts:
-        for account_id in swept_accounts:
+        for account_id, refusals in swept_accounts:
+            idp_refused, trust_refused, eb_refused, residual = _classify_refusals(account_id, refusals)
+            evidence = swept_evidence.get(account_id, [])
+
             out.append(f"- **{account_id}**")
-            out.append(
-                _channel_state(
-                    "Identity providers",
-                    idp_refusals.get(account_id),
-                    _found_by_channel(providers, f"aws:iam:{account_id}", _IDP_FOUND_KEYS),
-                )
-            )
-            out.append(
-                _channel_state(
-                    "Cross-account trust",
-                    trust_refusals.get(account_id),
-                    _found_by_channel(providers, f"aws:iam:{account_id}", (_TRUST_FOUND_KEY,)),
-                )
-            )
-            eb_refused = eventbridge_refusals.get(account_id)
-            out.append(
-                _channel_state(
-                    "Partner event sources",
-                    eb_refused,
-                    _found_by_channel(providers, f"aws:events:{account_id}:", (_EVENTBRIDGE_FOUND_KEY,)),
-                    unavailable=(
-                        "no region was known to sweep (no state file or cluster named one)"
-                        if no_regions_known and not eb_refused
-                        else None
-                    ),
-                )
-            )
+            out.append(_idp_line(idp_refused, _found(evidence, _IDP_FOUND_KEYS)))
+            out.append(_trust_line(trust_refused, _found(evidence, (_TRUST_FOUND_KEY,))))
+            out.append(_eventbridge_line(eb_refused, _found(evidence, (_EVENTBRIDGE_FOUND_KEY,)), no_regions_known))
+            residual_by_account += [(account_id, line) for line in residual]
         out.append("")
     elif aws_sweep_configured:
         aws_sweep_refusal = next((line for line in clickops_refused if line.startswith(_AWS_SWEEP_PREFIX)), None)
@@ -232,30 +244,51 @@ def _accounts_swept_section(perimeter: dict[str, Any], providers: Sequence[Any])
             # is a different, earlier failure than a named account being
             # refused, and must not be described as one.
             out += [f"No account could be resolved to sweep: {aws_sweep_refusal}.", ""]
-        else:
+        elif unreachable_accounts:
             out += [
                 "Every account named in the sweep configuration was refused before a usable "
                 "session existed; none of the three channels above ran anywhere.",
                 "",
             ]
-    else:
-        out += [
-            "No `--sources` file with an `aws:` block was given, so identity providers, "
-            "cross-account trust relationships and partner event sources were never "
-            "attempted in any account. Only AWS Marketplace billing ran for this scan, "
-            "because it needs no account list — one of the four click-ops channels, not "
-            "all of them.",
-            "",
-        ]
+        else:
+            # Configured, but the `aws:` block itself named zero accounts —
+            # neither `accounts:` nor `assume_role_name:` resolved to
+            # anything — which is milder than either case above: nothing was
+            # even attempted, let alone refused.
+            out += [
+                "The `aws:` block in `--sources` did not resolve to a single account to sweep — "
+                "identity providers, cross-account trust relationships and partner event sources "
+                "were never attempted anywhere.",
+                "",
+            ]
+    # No final `else` for "no --sources file at all": `swept_accounts`,
+    # `unreachable_accounts` and `unnamed_principals` are only ever populated
+    # inside `_collect_aws`'s `if sweep is not None:` block (cli.py), which is
+    # exactly `aws_sweep_configured`. So whenever `aws_sweep_configured` is
+    # false, all three are guaranteed empty too, and the guard above already
+    # returned before reaching this line — this case is already stated, once,
+    # by the "AWS click-ops discovery" line in "What was read".
 
-    unreachable = _unreachable_accounts(clickops_refused)
-    if unreachable:
+    if unreachable_accounts:
         out += [
             "Accounts named to be swept but never reached at all — no session could be "
             "established, so no channel above was even attempted for them:",
             "",
         ]
-        out += [f"- **{account}**: {message}" for account, message in unreachable]
+        out += [f"- **{account}**: {message}" for account, message in unreachable_accounts]
+        out.append("")
+
+    if residual_by_account:
+        out += [
+            "### Refusals we could not attribute to a channel",
+            "",
+            "Every other refusal above was recognised as belonging to one of the three "
+            "channels. These were not — a reworded message, or a fifth channel this note "
+            "does not yet know about — and are shown as-is rather than left to default their "
+            "channel to a false *read, no result*:",
+            "",
+        ]
+        out += [f"- **{account}**: {message}" for account, message in residual_by_account]
         out.append("")
 
     if unnamed_principals:
@@ -382,7 +415,7 @@ def to_markdown(
         "at all. **This register does not claim to be complete.**",
         "",
     ]
-    out += _accounts_swept_section(perimeter, providers)
+    out += _accounts_swept_section(perimeter)
     out += [
         "## How vendors were identified",
         "",

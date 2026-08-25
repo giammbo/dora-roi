@@ -1017,7 +1017,11 @@ class TestAwsSweepAccounting:
 
         _collect_aws([], [], {}, sources)
 
-        assert sources.swept_accounts == ["444455556666"]
+        # Fix round 1: `swept_accounts` now pairs each account with exactly
+        # the refusals recorded during its own sweep — here, none — rather
+        # than a bare id, so a reader (and the methodology renderer) never
+        # has to reconstruct which refusal belongs to which account.
+        assert sources.swept_accounts == [("444455556666", [])]
         assert sources.unnamed_principals == [principal]
         # I2: no state files means no known regions, so the EventBridge
         # channel could not run for any account — that must be declared, not
@@ -1069,6 +1073,9 @@ class TestAwsSweepAccounting:
 
         assert sources.swept_accounts == []
         assert any("444455556666: no usable credentials" in entry for entry in sources.clickops_refused)
+        # Fix round 1: recorded by identity as its own fact, not left for the
+        # renderer to re-derive from `clickops_refused` by string matching.
+        assert sources.unreachable_accounts == [("444455556666", "no usable credentials (ProfileNotFound: bogus)")]
 
     def test_a_partial_denial_still_counts_as_swept(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """The account was reached — a session was created and at least one
@@ -1111,7 +1118,133 @@ class TestAwsSweepAccounting:
 
         _collect_aws([], [], {}, sources)
 
-        assert sources.swept_accounts == ["444455556666"]
+        assert sources.swept_accounts == [
+            ("444455556666", ["444455556666 iam-idp: iam:ListSAMLProviders denied (ClientError: AccessDenied)"])
+        ]
+
+
+class TestConsolePerimeterSurface:
+    """I4: the console surface (`describe()`, `_print_perimeter`,
+    `PERIMETER_WARNING`) had zero test coverage before this fix round, which
+    is how C2 shipped — `describe()`'s click-ops line claimed "swept N
+    account(s)" for an account refused on every channel, right next to a
+    categorical `PERIMETER_WARNING`, and no test noticed."""
+
+    def _sweep_sources(self, **overrides: object) -> object:
+        from dora_roi.cli import _Sources
+        from dora_roi.collectors.sources import AwsSweep
+
+        base = {"states": [], "aws": True, "aws_sweep": AwsSweep(accounts=())}
+        base.update(overrides)
+        return _Sources(**base)
+
+    def test_describe_reports_a_clean_sweep_plainly(self) -> None:
+        sources = self._sweep_sources(swept_accounts=[("111122223333", [])])
+        lines = sources.describe()
+        assert any(line == "AWS click-ops discovery: swept 1 account(s)" for line in lines)
+
+    def test_describe_flags_an_account_refused_on_a_channel(self) -> None:
+        """C2: a swept account is not the same claim as a clean one — the
+        line every user sees on every run must say so, not only
+        methodology.md."""
+        sources = self._sweep_sources(
+            swept_accounts=[("111122223333", ["111122223333 iam-idp: iam:ListSAMLProviders denied (AccessDenied)"])]
+        )
+        lines = sources.describe()
+        click_ops_line = next(line for line in lines if line.startswith("AWS click-ops discovery"))
+        assert "1 with at least one channel refused" in click_ops_line
+        assert "methodology.md" in click_ops_line
+
+    def test_describe_flags_an_unreachable_account(self) -> None:
+        sources = self._sweep_sources(
+            swept_accounts=[], unreachable_accounts=[("555566667777", "no usable credentials (ProfileNotFound)")]
+        )
+        click_ops_line = next(line for line in sources.describe() if line.startswith("AWS click-ops discovery"))
+        assert "1 named but never reached" in click_ops_line
+
+    def test_describe_says_not_swept_with_no_sources_file(self) -> None:
+        from dora_roi.cli import _Sources
+
+        sources = _Sources(states=[], aws=True, aws_sweep=None)
+        expected = "AWS click-ops discovery: not swept (no --sources aws: block given)"
+        assert any(line == expected for line in sources.describe())
+
+    def test_print_perimeter_lists_refusals_next_to_the_warning(self, capsys: pytest.CaptureFixture) -> None:
+        """C2: the terminal must not print a categorical claim next to a
+        refused channel with no indication anything went wrong."""
+        from dora_roi.cli import PERIMETER_WARNING, _print_perimeter
+
+        sources = self._sweep_sources(
+            swept_accounts=[("111122223333", ["111122223333 iam-idp: iam:ListSAMLProviders denied (AccessDenied)"])]
+        )
+        sources.clickops_refused.append("111122223333 iam-idp: iam:ListSAMLProviders denied (AccessDenied)")
+        _print_perimeter(sources, gleif=False)
+        output = capsys.readouterr().out
+        assert "Refused (1)" in output
+        assert "iam:ListSAMLProviders denied" in output
+        assert PERIMETER_WARNING in output
+
+    def test_print_perimeter_prints_no_refused_block_when_clean(self, capsys: pytest.CaptureFixture) -> None:
+        sources = self._sweep_sources(swept_accounts=[("111122223333", [])])
+        from dora_roi.cli import _print_perimeter
+
+        _print_perimeter(sources, gleif=False)
+        output = capsys.readouterr().out
+        assert "Refused" not in output
+
+    def test_perimeter_warning_does_not_claim_every_account_was_read_cleanly(self) -> None:
+        """C2: the constant itself must hold even when printed alone — it
+        must not assert every named account was read, only that nothing
+        outside the named scope was attempted."""
+        from dora_roi.cli import PERIMETER_WARNING
+
+        assert "was read" not in PERIMETER_WARNING.lower()
+        assert "scope" in PERIMETER_WARNING.lower()
+
+    def test_a_refused_account_is_visible_end_to_end_on_a_real_scan(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The full path: a denied channel must reach stdout, not only
+        methodology.md, on an actual `scan` invocation."""
+        from datetime import date
+
+        from dora_roi.collectors.aws import DiscoveredAccount, ExpenseReport, OrganizationInventory
+
+        org = OrganizationInventory(
+            organization_id="o-x",
+            master_account_id="111122223333",
+            accounts=[
+                DiscoveredAccount(
+                    account_id="111122223333", name="root", email=None, status="ACTIVE", ou_path=("Root",)
+                )
+            ],
+        )
+        monkeypatch.setattr(cli_module, "collect_organization", lambda **k: org)
+        monkeypatch.setattr(
+            cli_module,
+            "collect_annual_expense",
+            lambda **k: ExpenseReport(currency=None, by_service={}, period=(date(2025, 8, 1), date(2026, 8, 1))),
+        )
+        monkeypatch.setattr(cli_module, "collect_marketplace", lambda **k: ([], []))
+
+        def fake_sweep(*, account_id: str, refused: list[str], **_: object):
+            refused.append(f"{account_id} iam-idp: iam:ListSAMLProviders denied (ClientError: AccessDenied)")
+            return [], []
+
+        monkeypatch.setattr(cli_module, "collect_clickops", fake_sweep)
+
+        sources_file = tmp_path / "sources.yaml"
+        sources_file.write_text("states: []\naws:\n  accounts:\n    - id: '444455556666'\n      profile: member\n")
+
+        result = runner.invoke(app, ["scan", "-o", str(tmp_path), "--aws", "--sources", str(sources_file)])
+        assert result.exit_code == 0, result.output
+        # Two refusals reach stdout: the per-account denial this test injects,
+        # and the pre-existing global "no regions known" one — no state file
+        # is given here, so EventBridge never learns a region either. Both
+        # belong on the console, not only in methodology.md.
+        assert "Refused (2)" in result.output
+        assert "444455556666 iam-idp: iam:ListSAMLProviders denied" in result.output
+        assert "with at least one channel refused" in result.output
 
 
 class TestKubernetesWiring:
