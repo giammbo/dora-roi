@@ -37,6 +37,23 @@ Everything below is new, so this is a feature list rather than a diff.
   `required_providers` block at all.
 - AWS Organizations for the group structure, and Cost Explorer for annual expense over
   twelve whole months, scoped to the payer account the call was actually made from.
+- Four channels for vendors that appear in no Terraform code at all, in the accounts an
+  `aws:` block in `sources.yaml` names — a file that needs no `states:` key:
+  - **AWS Marketplace billing**: the seller of record on the Marketplace charges. The
+    only channel that produces a `FILLED` legal name and expense, because it is the only
+    one that reads a legal entity AWS itself invoices. Two seller names that reduce to
+    one vendor key are refused rather than resolved by picking one.
+  - **Federated identity providers**: SAML metadata and OIDC issuer hostnames.
+  - **Cross-account trust policies**: which outside AWS accounts hold standing
+    `sts:AssumeRole` access. An account no table can name is declared as an unknown
+    rather than given an invented vendor name, and a role whose principal is `*` — no
+    account named at all — is reported as its own kind of finding rather than as
+    nothing.
+  - **EventBridge partner event sources**: SaaS integrations wired into an event bus,
+    swept only in regions an AWS resource in the perimeter already named.
+- Per account and per channel, the methodology note distinguishes read, read-and-found-
+  nothing, refused, never attempted, and unconfirmed — the states that used to arrive as
+  the same empty list.
 - Kubernetes: image registries, `ExternalName` services, ingress hosts.
 
 #### The register

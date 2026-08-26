@@ -145,13 +145,31 @@ def _document(path: str | Path) -> Any:
 
 
 def load_sources(path: str | Path) -> list[StateSource]:
-    """Read a sources YAML: a list of URIs, each with optional credentials."""
+    """Read a sources YAML: a list of URIs, each with optional credentials.
+
+    A file carrying only an ``aws:`` block and no ``states:`` key at all is
+    valid and yields no state sources — that is the whole point of the
+    no-Terraform case the ``aws:`` block exists for. It used to raise, so the
+    scenario this branch was built for ("several AWS accounts, no IaC
+    anywhere") could only be configured by someone who already knew to add a
+    dummy ``states: []`` line, which the tests did and no document mentioned
+    (finding C6).
+
+    A file with neither key is still an error: it configures nothing, and
+    silently scanning nothing is the failure mode this tool exists to avoid.
+    """
     document = _document(path)
 
     if document is None:
         return []
-    if not isinstance(document, dict) or "states" not in document:
-        raise SourceError(f"{path} must be a mapping with a `states:` list. See `dora-roi sources init`.")
+    if not isinstance(document, dict) or not ({"states", "aws"} & set(document)):
+        raise SourceError(
+            f"{path} must be a mapping with a `states:` list, an `aws:` block, or both. `states:` takes "
+            f"paths or s3:// URIs to Terraform state; `aws:` names the accounts to sweep for vendors that "
+            f"appear in no state at all. See the README for an example of each."
+        )
+    if "states" not in document:
+        return []
 
     entries = document["states"]
     if not isinstance(entries, list):

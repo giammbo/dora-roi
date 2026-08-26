@@ -78,6 +78,45 @@ URI it came from, not the temporary path it landed in.
 A provider found in several states is one provider with the weight of all of them,
 and the report names every file it read — never the directory it found them in.
 
+**No Terraform at all?** The same file takes an `aws:` block, which is what points the
+vendor-discovery channels at your accounts. It is independent of `states:` — either key
+on its own is a valid file — and an `aws:` block alone is the case a tool that reads
+only Terraform cannot serve at all:
+
+```yaml
+# sources.yaml — no state files anywhere; sweep the whole organisation
+aws:
+  profile: management           # credentials for Organizations, Cost Explorer
+                                # and Marketplace billing; omit to use the default
+  assume_role_name: DoraRoiReadOnly   # tried in every account Organizations lists
+```
+
+```bash
+dora-roi scan --sources sources.yaml --aws -o out/     # --aws is what turns the block on
+```
+
+`assume_role_name` is the shortcut for an organisation too large to list by hand: the
+role is assumed in every account AWS Organizations reports, and an account where it is
+missing is named in the methodology note as one that was never reached, rather than
+skipped in silence. Name the accounts instead when you want to say exactly what will be
+read — explicit always wins over the shortcut, and each account brings its own
+credentials:
+
+```yaml
+aws:
+  accounts:
+    - id: "111122223333"
+      profile: prod
+    - id: "222233334444"
+      role_arn: arn:aws:iam::222233334444:role/DoraRoiReadOnly
+```
+
+Every key is optional except that each account needs a `profile` or a `role_arn` —
+dora-roi will not guess which credentials to read an account with. EventBridge is
+regional, so it is swept only in regions an AWS resource in the perimeter already
+named; on a scan with no state files that set is empty, and the methodology note
+says the channel was never attempted rather than letting it read as empty.
+
 Look before you leap:
 
 ```bash
@@ -150,9 +189,12 @@ Read this part before the rest.
   personal or company card, no billing line, no IAM trust, no event integration — is
   exactly as invisible as it always was, and now sits next to vendors the tool *can* see,
   which makes the gap easier to miss, not smaller. Every command prints exactly what was
-  scanned, and the methodology note states, per channel and per account, whether it was
-  read, read and found nothing, or refused — an empty result and a refusal are opposite
-  claims and this tool never lets them look the same.
+  scanned, and the methodology note states, per channel and per account, which of those
+  happened: read, read and found nothing, refused, never attempted, or — for a refusal
+  it cannot attribute to a channel — *unconfirmed*, which withdraws that account's other
+  clean claims instead of leaving them standing. An empty result and a refusal are
+  opposite claims, and every rendering path here is built to keep them apart; where the
+  tool cannot tell which it had, it says that rather than picking one.
 - **It does not classify your services for you.** The S01–S19 code a provider gets is
   your regulatory responsibility. The packaged mapping suggests; you decide.
 - **It does not know your contracts.** Reference numbers, dates, notice periods,
