@@ -46,6 +46,7 @@ __all__ = [
     "annual_window",
     "collect_annual_expense",
     "collect_organization",
+    "cost_and_usage_pages",
     "expense_for_provider",
     "readonly",
 ]
@@ -333,6 +334,34 @@ def annual_window(today: date | None = None) -> tuple[date, date]:
     return start, end
 
 
+def cost_and_usage_pages(client: CostExplorerClient, **kwargs: Any) -> list[dict[str, Any]]:
+    """Every page of one ``get_cost_and_usage`` request, concatenated.
+
+    Cost Explorer paginates a single grouped request over ``NextPageToken``
+    once the result set is large enough — a different field name again from
+    Organizations' ``NextToken`` (:func:`_pages`), IAM's ``Marker`` and
+    EventBridge's own ``NextToken``. A silently truncated page makes a real
+    group vanish exactly the way one that never existed does, which is
+    indistinguishable from the outside.
+
+    Shared by both callers rather than written twice: the Marketplace channel
+    in :mod:`.clickops` (grouped by ``LEGAL_ENTITY_NAME``, the only channel
+    that ever produces FILLED) and :func:`collect_annual_expense` below
+    (grouped by ``SERVICE``, which produces *more* groups over the same
+    window, so it is the likelier of the two to paginate). The first had this
+    loop and the second read a single page — the invariant established on the
+    lower-risk instance and violated on the higher one (finding C4).
+    """
+    results: list[dict[str, Any]] = []
+    token: str | None = None
+    while True:
+        page = readonly(client, "get_cost_and_usage", **kwargs, **({"NextPageToken": token} if token else {}))
+        results.extend(page.get("ResultsByTime", []))
+        token = page.get("NextPageToken")
+        if not token:
+            return results
+
+
 def collect_annual_expense(
     *,
     client: CostExplorerClient | None = None,
@@ -350,9 +379,8 @@ def collect_annual_expense(
         from botocore.exceptions import BotoCoreError, ClientError
 
         client = client if client is not None else _ce_client(profile)
-        response = readonly(
+        results = cost_and_usage_pages(
             client,
-            "get_cost_and_usage",
             TimePeriod={"Start": start.isoformat(), "End": end.isoformat()},
             Granularity="MONTHLY",
             Metrics=[_COST_METRIC],
@@ -375,7 +403,7 @@ def collect_annual_expense(
 
     totals: dict[str, Decimal] = {}
     currency: str | None = None
-    for window in response.get("ResultsByTime", []):
+    for window in results:
         for group in window.get("Groups", []):
             metric = group.get("Metrics", {}).get(_COST_METRIC, {})
             unit = metric.get("Unit")

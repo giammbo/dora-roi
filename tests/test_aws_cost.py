@@ -53,6 +53,47 @@ class TestCollectAnnualExpense:
         assert report.by_service["Amazon S3"] == Decimal("300.25")
         assert report.total == Decimal("1500.75")
 
+    def test_a_second_page_of_services_is_not_dropped(self, stubbed) -> None:
+        """C4: this call groups twelve months by SERVICE, so it produces more
+        groups than the Marketplace call that already paginated — and its
+        figure is what `cli` marks FILLED for the `aws` row. A truncated page
+        makes a service's spend vanish exactly as though it were never
+        billed."""
+        client, stubber = stubbed
+        page1 = ce_response({"Amazon S3": "300.25"})
+        page1["NextPageToken"] = "page-2"
+        stubber.add_response("get_cost_and_usage", page1)
+        stubber.add_response(
+            "get_cost_and_usage",
+            ce_response({"Amazon Relational Database Service": "900.00"}),
+            {
+                "TimePeriod": {"Start": "2025-08-01", "End": "2026-08-01"},
+                "Granularity": "MONTHLY",
+                "Metrics": ["UnblendedCost"],
+                "GroupBy": [{"Type": "DIMENSION", "Key": "SERVICE"}],
+                "NextPageToken": "page-2",
+            },
+        )
+        stubber.activate()
+
+        report = collect_annual_expense(client=client, today=date(2026, 8, 22))
+
+        assert report.by_service["Amazon Relational Database Service"] == Decimal("900.00")
+        assert report.total == Decimal("1200.25")
+        stubber.assert_no_pending_responses()
+
+    def test_a_single_page_makes_exactly_one_call(self, stubbed) -> None:
+        """The negative half: no token means no second request, so the loop
+        cannot turn one bill into two."""
+        client, stubber = stubbed
+        stubber.add_response("get_cost_and_usage", ce_response({"Amazon S3": "300.25"}))
+        stubber.activate()
+
+        report = collect_annual_expense(client=client, today=date(2026, 8, 22))
+
+        assert report.total == Decimal("300.25")
+        stubber.assert_no_pending_responses()
+
     def test_asks_for_exactly_twelve_trailing_months(self, stubbed) -> None:
         client, stubber = stubbed
         stubber.add_response(
