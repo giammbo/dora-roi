@@ -29,6 +29,7 @@ from typing import Any, Protocol
 
 from pydantic import ValidationError
 
+from dora_roi.collectors.clickops import ExternalPrincipal
 from dora_roi.models.enums import FieldStatus
 from dora_roi.models.templates import (
     FIELD_CATALOG,
@@ -40,6 +41,7 @@ from dora_roi.models.templates import (
     RegisterOfInformation,
     RoIRow,
 )
+from dora_roi.naming import vendor_key
 
 __all__ = [
     "Finding",
@@ -111,12 +113,23 @@ class Finding:
     row_key: str = ""
 
 
-def preflight(roi: RegisterOfInformation, *, gleif: _LeiLookup | None = None) -> list[Finding]:
+def preflight(
+    roi: RegisterOfInformation,
+    *,
+    gleif: _LeiLookup | None = None,
+    unnamed_principals: Sequence[ExternalPrincipal] = (),
+) -> list[Finding]:
     """Every check, blocking findings first.
 
     ``gleif`` is optional and only used to confirm that an LEI exists and is
     ACTIVE. Without it the LEI checks stay offline and cover format and
     presence, which is most of the failure mode already.
+
+    ``unnamed_principals`` is not a field on ``RegisterOfInformation`` and
+    never will be: it is :mod:`.collectors.clickops`' output, and giving the
+    model a field for it would make ``models/`` import from ``collectors/``,
+    inverting the layering this repo keeps. The caller (``cli.py``, which
+    already imports both) threads the list through here instead.
     """
     findings: list[Finding] = []
     findings += _check_completeness(roi)
@@ -125,6 +138,8 @@ def preflight(roi: RegisterOfInformation, *, gleif: _LeiLookup | None = None) ->
     findings += _check_supply_chain(roi)
     findings += _check_arrangements(roi)
     findings += _check_duplicate_codes(roi)
+    findings += _check_duplicate_vendors(roi)
+    findings += _check_unnamed_principals(unnamed_principals)
     findings += _check_eba_rules(roi)
     findings += _check_domain_data()
     return sorted(findings, key=lambda f: (0 if f.severity is Severity.BLOCKING else 1, f.template, f.field))
@@ -414,6 +429,100 @@ def _check_duplicate_codes(roi: RegisterOfInformation) -> list[Finding]:
         )
         for code, names in sorted(seen.items())
         if len(names) > 1
+    ]
+
+
+def _check_duplicate_vendors(roi: RegisterOfInformation) -> list[Finding]:
+    """Two provider rows whose legal names normalise to the same key.
+
+    :func:`dora_roi.naming.vendor_key` is deliberately blunt and is used
+    elsewhere in this codebase only to *merge* — the whole point of that
+    bluntness is that fuzzy matching is refused for merging, because a silent
+    fuzzy merge makes one vendor disappear inside another and nobody finds
+    out. Here the same key is used the opposite way: to *ask*. Two rows that
+    collide on it are surfaced to a person and left exactly as they were,
+    because a fuzzy warning puts both rows in front of someone who knows which
+    one is their real counterparty — a judgement this tool cannot make and
+    must not guess at.
+    """
+    groups: dict[str, list[str]] = {}
+    for index, provider in enumerate(roi.providers, start=1):
+        if not provider.legal_name:
+            continue
+        groups.setdefault(vendor_key(provider.legal_name), []).append(_row_key(provider, index))
+
+    findings: list[Finding] = []
+    for key, names in sorted(groups.items()):
+        if len(names) < 2:
+            continue
+        findings.append(
+            Finding(
+                code="POSSIBLE_DUPLICATE_VENDOR",
+                severity=Severity.WARNING,
+                message=(
+                    f"{len(names)} providers normalise to the same name ({key!r}): {', '.join(names)}. "
+                    "They may be one vendor filed as two rows, typically an AWS Marketplace seller name "
+                    "that was never merged with its Terraform provider entry."
+                ),
+                fix=(
+                    "Check which row names your actual contractual counterparty — the legal name on the "
+                    "invoice or LEI record, not the one that happens to read cleaner — and correct or "
+                    "remove the other. This is flagged rather than merged automatically: this tool refuses "
+                    "fuzzy matching for merging because a silent merge can fold two genuinely distinct "
+                    "companies into one row with nobody noticing, which is worse than two rows that turn "
+                    "out to both be true. Only a person who knows the counterparty can tell which case "
+                    "this is."
+                ),
+                template="B_05.01",
+                field="0050",
+                row_key=names[0],
+            )
+        )
+    return findings
+
+
+def _check_unnamed_principals(unnamed_principals: Sequence[ExternalPrincipal]) -> list[Finding]:
+    """An outside AWS account can assume a role here, and no table can name it.
+
+    :class:`.collectors.clickops.ExternalPrincipal` is itself the finding this
+    channel exists to produce: golden rule 1 forbids turning an account number
+    nobody vouched for into a vendor name, so the account lands here instead
+    of as a guessed row in ``B_05.01``. "An external account has standing
+    access and this register cannot say whose it is" is a true, actionable
+    statement an auditor can act on — unlike a guessed name that turns out
+    wrong.
+
+    ``ExternalPrincipal`` does not record which of the scanned AWS accounts
+    grants the access (a known, deferred gap in the collector), so the message
+    below does not claim to know that either.
+    """
+    return [
+        Finding(
+            code="UNIDENTIFIED_EXTERNAL_PRINCIPAL",
+            severity=Severity.WARNING,
+            message=(
+                f"AWS account {principal.account_id} can assume the role {principal.role_name!r} and no "
+                "table names it as a vendor: an external account has standing access and this register "
+                "cannot say whose it is."
+            ),
+            fix=(
+                f"Find out who controls AWS account {principal.account_id} and either add it to the "
+                "account-ID mapping or the overlay so it becomes a named provider row, or remove the "
+                "trust relationship if it is stale. dora-roi will not guess a legal name from a bare "
+                "account number — that would turn a hypothesis into a fact, which this tool's "
+                "provenance rule forbids."
+                + (
+                    ""
+                    if principal.has_external_id
+                    else " The trust also has no sts:ExternalId condition, so anyone who controls that "
+                    "account, not only your intended counterparty, can assume the role."
+                )
+            ),
+            template="B_05.01",
+            field="0050",
+            row_key=f"{principal.account_id}:{principal.role_name}",
+        )
+        for principal in unnamed_principals
     ]
 
 
