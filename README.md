@@ -239,8 +239,9 @@ can make.** There is an issue template for exactly that.
 
 ## What dora-roi is allowed to do to your AWS account
 
-Nothing. Grant exactly this and no more — every action is a read, and the code
-refuses to issue anything else before the call leaves the process:
+Nothing, beyond one declared exception. Grant exactly this and no more — every
+action but `sts:AssumeRole` is a read, and the code refuses to issue anything
+else before the call leaves the process:
 
 ```json
 {
@@ -248,21 +249,21 @@ refuses to issue anything else before the call leaves the process:
   "Statement": [{
     "Effect": "Allow",
     "Action": [
+      "ce:GetCostAndUsage",
+      "events:ListEventSources",
+      "iam:GetOpenIDConnectProvider",
+      "iam:GetSAMLProvider",
+      "iam:ListOpenIDConnectProviders",
+      "iam:ListRoles",
+      "iam:ListSAMLProviders",
       "organizations:DescribeOrganization",
-      "organizations:ListRoots",
-      "organizations:ListAccounts",
       "organizations:ListAccountsForParent",
       "organizations:ListOrganizationalUnitsForParent",
+      "organizations:ListRoots",
       "s3:GetObject",
       "s3:ListBucket",
-      "ce:GetCostAndUsage",
-      "ce:GetTags",
-      "tag:GetResources",
-      "tag:GetTagKeys",
-      "resource-explorer-2:Search",
-      "resource-explorer-2:ListViews",
-      "iam:ListRoles",
-      "iam:ListUsers"
+      "sts:AssumeRole",
+      "sts:GetCallerIdentity"
     ],
     "Resource": "*"
   }]
@@ -271,10 +272,30 @@ refuses to issue anything else before the call leaves the process:
 
 Scope the two `s3:` actions to your state buckets and nothing wider. Drop them entirely if you never point `--sources` at S3.
 
-The guarantee is not a promise in a document. Every AWS call goes through a
-wrapper that rejects any operation which is not a `List*`, `Describe*`, `Get*` or
-`Search*`, and there is a test asserting that `create_account` raises rather than
-executes.
+`sts:AssumeRole` is needed only for the `assume_role_name` multi-account sweep
+shortcut and the S3 `role_arn` option, both described above — list every account
+with its own `profile` instead of relying on the shortcut and you can drop it
+from the policy too.
+
+This list shrank as well as grew. Seven actions the previous policy granted are
+gone because no line of code ever called them: `ce:GetTags`, `tag:GetResources`,
+`tag:GetTagKeys`, `resource-explorer-2:Search`, `resource-explorer-2:ListViews`,
+`iam:ListUsers`, and `organizations:ListAccounts` (a different, broader
+Organizations call than the one the account walker actually makes,
+`ListAccountsForParent`, from the root down). `sts:GetCallerIdentity`,
+`iam:ListSAMLProviders`, `iam:GetSAMLProvider`, `iam:ListOpenIDConnectProviders`,
+`iam:GetOpenIDConnectProvider` and `events:ListEventSources` are new: the first
+labels which account a Cost Explorer figure was billed to, the rest back the
+identity-provider, trust-relationship and EventBridge-partner channels described
+under "What it does **not** do" above. A test
+(`tests/test_iam_policy.py`) parses this JSON block and asserts its action set
+equals `dora_roi.collectors.aws.REQUIRED_IAM_ACTIONS` exactly, so the two
+cannot drift apart again the way they already had.
+
+The guarantee is not a promise in a document. Every AWS call but the declared
+`sts:AssumeRole` exception goes through a wrapper that rejects any operation
+which is not a `List*`, `Describe*`, `Get*` or `Search*`, and there is a test
+asserting that `create_account` raises rather than executes.
 
 ## More sources, and the things only you know
 

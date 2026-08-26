@@ -38,6 +38,7 @@ AwsClient = Any
 
 __all__ = [
     "READ_ONLY_ACTIONS",
+    "REQUIRED_IAM_ACTIONS",
     "AwsError",
     "DiscoveredAccount",
     "ExpenseReport",
@@ -65,6 +66,49 @@ READ_ONLY_ACTIONS: tuple[str, ...] = (
     "resource-explorer-2:ListViews",
     "iam:ListRoles",
     "iam:ListUsers",
+)
+
+#: Every IAM action dora-roi can issue, across every collector — not just this
+#: module. The README publishes exactly this set as the policy to grant, and
+#: ``tests/test_iam_policy.py`` asserts the two agree, so the document cannot
+#: drift into promising less (a sweep that fails in the field) or asking for
+#: more (permissions a read-only tool has no business requesting) than the
+#: code actually does.
+#:
+#: Unlike :data:`READ_ONLY_ACTIONS` above — which predates this constant, is
+#: scoped only to this module's own Organizations/Cost Explorer calls, and
+#: itself names several actions nothing calls — this set was built by reading
+#: every ``readonly()`` call site plus the two declared ``sts:AssumeRole``
+#: exceptions and the one direct ``sts:GetCallerIdentity`` call, across
+#: ``aws.py``, ``clickops.py`` and ``sources.py``. See the README's IAM policy
+#: section for the file:line justifying each entry.
+REQUIRED_IAM_ACTIONS: frozenset[str] = frozenset(
+    {
+        # collect_organization() and its pagination helpers (aws.py)
+        "organizations:DescribeOrganization",
+        "organizations:ListRoots",
+        "organizations:ListAccountsForParent",
+        "organizations:ListOrganizationalUnitsForParent",
+        # collect_annual_expense() (aws.py) and collect_marketplace() (clickops.py)
+        "ce:GetCostAndUsage",
+        # calling_account() (aws.py) — labels which account Cost Explorer answered for
+        "sts:GetCallerIdentity",
+        # fetch_sources()'s S3 backend reader (sources.py)
+        "s3:GetObject",
+        "s3:ListBucket",
+        # the assume_role_name sweep shortcut (clickops.py) and the S3 role_arn
+        # option (sources.py) — a declared exception to golden rule 2, not a read
+        "sts:AssumeRole",
+        # collect_identity_providers() (clickops.py)
+        "iam:ListSAMLProviders",
+        "iam:GetSAMLProvider",
+        "iam:ListOpenIDConnectProviders",
+        "iam:GetOpenIDConnectProvider",
+        # collect_trust_relationships() (clickops.py)
+        "iam:ListRoles",
+        # collect_partner_event_sources() (clickops.py)
+        "events:ListEventSources",
+    }
 )
 
 _READ_PREFIXES = ("list_", "describe_", "get_", "search")
