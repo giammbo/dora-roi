@@ -86,13 +86,16 @@ only Terraform cannot serve at all:
 ```yaml
 # sources.yaml — no state files anywhere; sweep the whole organisation
 aws:
-  profile: management           # credentials for Organizations, Cost Explorer
-                                # and Marketplace billing; omit to use the default
+  profile: management           # base credentials the sweep assumes each member-account
+                                # role from; omit to use the default. Organizations, Cost
+                                # Explorer and Marketplace are not read with this profile —
+                                # they use the one `--aws-profile` names, so pass
+                                # `--aws-profile management` to aim them at the payer too
   assume_role_name: DoraRoiReadOnly   # tried in every account Organizations lists
 ```
 
 ```bash
-dora-roi scan --sources sources.yaml --aws -o out/     # --aws is what turns the block on
+dora-roi scan --sources sources.yaml --aws --aws-profile management -o out/   # --aws turns the block on
 ```
 
 `assume_role_name` is the shortcut for an organisation too large to list by hand: the
@@ -193,8 +196,11 @@ Read this part before the rest.
   happened: read, read and found nothing, refused, never attempted, or — for a refusal
   it cannot attribute to a channel — *unconfirmed*, which withdraws that account's other
   clean claims instead of leaving them standing. An empty result and a refusal are
-  opposite claims, and every rendering path here is built to keep them apart; where the
-  tool cannot tell which it had, it says that rather than picking one.
+  opposite claims, and the per-account lines are rendered to keep them apart; where the
+  tool cannot tell which it had, it says that rather than picking one. One line is not
+  there yet: the note's *AWS Organizations and Cost Explorer* entry reads *read* even on a
+  run where the Organizations call was refused — that refusal reaches the terminal only,
+  and the note names it as its own blind spot rather than implying it has none.
 - **It does not classify your services for you.** The S01–S19 code a provider gets is
   your regulatory responsibility. The packaged mapping suggests; you decide.
 - **It does not know your contracts.** Reference numbers, dates, notice periods,

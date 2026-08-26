@@ -580,7 +580,8 @@ def _unnamed_finding(principal: ExternalPrincipal) -> Finding:
             "table names it as a vendor: an external account has standing access and this register "
             "cannot say whose it is. If AWS Organizations could not be read on the scan that wrote "
             "this file, an account of your own organisation appears here exactly as a third party "
-            "would — methodology.md says whether that call succeeded."
+            "would — that scan prints such a failure as a warning on its terminal output, which is "
+            "where to check whether it happened."
         ),
         fix=(
             f"Find out who controls AWS account {principal.account_id} and either add it to the "
