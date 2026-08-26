@@ -536,6 +536,87 @@ class TestUnidentifiedExternalPrincipal:
         assert "externalid" not in finding.fix.lower()
 
 
+class TestUnidentifiedPrincipalCarriesTheOrganizationsCaveat:
+    """C7: *outside* is decided by subtracting the accounts AWS Organizations
+    named. When that call was refused there is nothing to subtract, so a
+    sibling account in the filer's own organisation reaches this check exactly
+    as a vendor's would. methodology.md says so; `check` and `export` never
+    open methodology.md, so the message has to carry it."""
+
+    def finding(self) -> Finding:
+        principal = ExternalPrincipal(account_id="999988887777", role_name="MysteryRole", has_external_id=True)
+        return next(
+            f
+            for f in preflight(RegisterOfInformation(), unnamed_principals=[principal])
+            if f.code == "UNIDENTIFIED_EXTERNAL_PRINCIPAL"
+        )
+
+    def test_the_message_says_organizations_may_be_why_it_looks_external(self) -> None:
+        message = self.finding().message.lower()
+        assert "organizations" in message
+        assert "your own organisation" in message
+
+    def test_it_still_states_the_finding_rather_than_only_hedging(self) -> None:
+        """The caveat qualifies the claim; it must not replace it."""
+        message = self.finding().message
+        assert "999988887777" in message
+        assert "standing access" in message
+
+
+class TestWildcardExternalPrincipal:
+    """C2: `Principal: "*"` names no counterparty because it names all of
+    them, which is a different finding from an account no table could name."""
+
+    def wildcard(self, has_external_id: bool = False) -> ExternalPrincipal:
+        return ExternalPrincipal(account_id="*", role_name="PublicRole", has_external_id=has_external_id)
+
+    def finding(self, has_external_id: bool = False) -> Finding:
+        return next(
+            f
+            for f in preflight(RegisterOfInformation(), unnamed_principals=[self.wildcard(has_external_id)])
+            if f.code == "WILDCARD_EXTERNAL_PRINCIPAL"
+        )
+
+    def test_it_gets_its_own_code_not_the_unnamed_one(self) -> None:
+        found = codes(preflight(RegisterOfInformation(), unnamed_principals=[self.wildcard()]))
+        assert "WILDCARD_EXTERNAL_PRINCIPAL" in found
+        assert "UNIDENTIFIED_EXTERNAL_PRINCIPAL" not in found
+
+    def test_a_real_account_still_gets_the_unnamed_code(self) -> None:
+        """The negative half: the branch must not swallow the ordinary case."""
+        principal = ExternalPrincipal(account_id="999988887777", role_name="MysteryRole", has_external_id=False)
+        found = codes(preflight(RegisterOfInformation(), unnamed_principals=[principal]))
+        assert "UNIDENTIFIED_EXTERNAL_PRINCIPAL" in found
+        assert "WILDCARD_EXTERNAL_PRINCIPAL" not in found
+
+    def test_the_message_is_about_the_principal_not_an_unidentified_account(self) -> None:
+        message = self.finding().message
+        assert "PublicRole" in message
+        assert "restricted to no AWS account" in message
+        assert "cannot say whose it is" not in message
+
+    def test_it_does_not_claim_every_account_can_assume_the_role(self) -> None:
+        """`Principal: "*"` with an `aws:PrincipalOrgID` condition is an
+        ordinary, restrictive policy, and this tool reads only
+        `sts:ExternalId` out of `Condition` — so effective access is not a
+        claim it is in a position to make."""
+        finding = self.finding()
+        assert "every AWS account can assume" not in finding.message
+        assert "does not evaluate the statement's conditions" in finding.fix
+        assert "aws:PrincipalOrgID" in finding.fix
+
+    def test_the_fix_is_to_read_the_policy_not_to_look_up_a_vendor(self) -> None:
+        fix = self.finding().fix
+        assert "name the account(s) meant to assume it" in fix
+        assert "account-ID mapping" not in fix
+
+    def test_an_external_id_is_recorded_without_being_treated_as_an_identity(self) -> None:
+        with_id = self.finding(has_external_id=True).fix
+        without_id = self.finding(has_external_id=False).fix
+        assert "shared string rather than an identity" in with_id
+        assert "is absent" in without_id
+
+
 class TestPossibleDuplicateVendor:
     """Fuzzy matching is refused for merging and used for asking (Task 1's `vendor_key`)."""
 

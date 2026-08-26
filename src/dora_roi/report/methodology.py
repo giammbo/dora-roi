@@ -85,8 +85,16 @@ _TRUST_MARKER = " trust: "
 _EVENTBRIDGE_MARKER = " eventbridge: "
 _EVENTBRIDGE_NO_REGIONS_PREFIX = "eventbridge: no regions known"
 _MARKETPLACE_PREFIX = "marketplace: "
+#: The one Marketplace refusal that is not a failed call: the response arrived
+#: and named two sellers for one vendor key (`clickops._ambiguous_seller`).
+#: Checked ahead of `_MARKETPLACE_PREFIX`, which it also starts with.
+_AMBIGUOUS_SELLER_PREFIX = "marketplace: ambiguous seller"
 _COST_EXPLORER_PREFIX = "cost explorer: "
 _AWS_SWEEP_PREFIX = "aws sweep: "
+#: `clickops.ANY_ACCOUNT`, spelled out here on the same reasoning as the
+#: refusal markers above: a small, stable protocol between that module and
+#: this one. `tests/test_methodology.py` checks the two agree.
+_ANY_ACCOUNT = "*"
 _NO_CREDS_TEXT = ": no usable credentials"
 _PARSE_FAILURE_TEXT = "unreadable trust policy"
 
@@ -117,6 +125,12 @@ def refusal_kind(line: str) -> str:
     - ``"not_attempted"`` — a channel or sweep that was never even tried,
       for a reason the message itself names (no known region, no resolved
       account list).
+    - ``"ambiguous"`` — the Marketplace call answered, and its answer named
+      more than one seller for one vendor key
+      (`clickops._ambiguous_seller`). Nothing failed and nothing was denied:
+      a fact was withheld because the response did not say which counterparty
+      it belonged to. Checked before the ``"unavailable"`` prefix, which this
+      message also starts with.
     - ``"unavailable"`` — the Cost Explorer or Marketplace billing call
       itself failed, for a reason this line does not narrow further:
       `_collect_aws`'s own comment on its Cost Explorer catch (cli.py) says
@@ -152,6 +166,8 @@ def refusal_kind(line: str) -> str:
         return "parse_failure"
     if line.startswith(_EVENTBRIDGE_NO_REGIONS_PREFIX) or line.startswith(_AWS_SWEEP_PREFIX):
         return "not_attempted"
+    if line.startswith(_AMBIGUOUS_SELLER_PREFIX):
+        return "ambiguous"
     if line.startswith(_COST_EXPLORER_PREFIX) or line.startswith(_MARKETPLACE_PREFIX):
         return "unavailable"
     return "denied"
@@ -169,7 +185,16 @@ def refusal_kind(line: str) -> str:
 #: trusts Okta's own AWS account) render as if each account had used both
 #: channels, which neither did.
 _IDP_FOUND_KEYS = ("saml_provider", "oidc_provider")
-_TRUST_FOUND_KEY = "assume_role_trust"
+#: Three keys, not one: the trust channel produces a provider row only for an
+#: account a table can name. `cli._channel_evidence` adds the other two for
+#: what it finds instead — an outside account declared as an unknown, and the
+#: `Principal: "*"` case, where the policy restricts the principal to no
+#: account at all. Reading
+#: `assume_role_trust` alone rendered both of those as *read, no result*, the
+#: sentence this note prints for an account nobody outside can get into
+#: (finding C2).
+_TRUST_FOUND_KEYS = ("assume_role_trust", "external_principal", "wildcard_trust_principal")
+_TRUST_WILDCARD_KEY = "wildcard_trust_principal"
 _EVENTBRIDGE_FOUND_KEY = "partner_event_source"
 
 
@@ -279,12 +304,20 @@ def _idp_line(refusals: list[str], found: bool) -> str:
     return f"  - Identity providers: {'read' if found else 'read, no result'}"
 
 
-def _trust_line(refusals: list[str], found: bool) -> str:
+def _trust_line(refusals: list[str], found: bool, wildcard: bool = False) -> str:
     """Cross-account trust: `iam:ListRoles` denied is AWS refusing the whole
     channel. A trust policy dora-roi could not parse on one role is *this
     tool's own* failure, not AWS saying no — the section defines *refused* as
     "AWS said no to a specific action", and labelling a parse failure that
     way would assert something that did not happen (review finding I2).
+
+    `wildcard` is a fourth state and takes precedence over the two clean ones:
+    a role in this account can be assumed by *every* AWS account. It is not a
+    refusal and not an empty read, and it used to render as the latter
+    (finding C2). The sentence deliberately claims nothing about the rest of
+    the account's roles, so it stays true next to an unattributed refusal —
+    which is also why `_withhold_if_uncertain` leaves it standing rather than
+    replacing it with a hedge that would drop the finding.
     """
     whole = _trust_whole(refusals)
     unparseable = [r for r in refusals if r not in whole]
@@ -295,6 +328,12 @@ def _trust_line(refusals: list[str], found: bool) -> str:
             f"  - Cross-account trust: read, but could not parse {len(unparseable)} role's own trust "
             f"policy — dora-roi's own parse failure, not an AWS denial — {'; '.join(unparseable)}"
         )
+    if wildcard:
+        return (
+            '  - Cross-account trust: a role here names the **wildcard principal `"*"`** — no account '
+            "at all — and is listed under *External principals we could not name*. This line says "
+            "nothing about the account's other trust relationships."
+        )
     return f"  - Cross-account trust: {'read' if found else 'read, no result'}"
 
 
@@ -302,7 +341,7 @@ def _eventbridge_line(refusals: list[str], found: bool, no_regions_known: bool) 
     """Partner event sources: one call type, so no partial/whole split applies.
 
     ``no_regions_known`` is a fourth, narrower state — the channel was never
-    even attempted because no state file or cluster ever named a region —
+    even attempted because nothing in the perimeter named an AWS region —
     which is neither a clean read nor a refusal and must not be reported as
     either.
     """
@@ -310,7 +349,8 @@ def _eventbridge_line(refusals: list[str], found: bool, no_regions_known: bool) 
         return f"  - Partner event sources: refused — {'; '.join(refusals)}"
     if no_regions_known:
         return (
-            "  - Partner event sources: not swept — no region was known to sweep (no state file or cluster named one)"
+            "  - Partner event sources: not swept — no AWS region was known to sweep (no AWS resource in "
+            "any state file or cluster named one)"
         )
     return f"  - Partner event sources: {'read' if found else 'read, no result'}"
 
@@ -329,7 +369,20 @@ def _withhold_if_uncertain(line: str, has_residual: bool) -> str:
     """
     if not has_residual:
         return line
-    if any(marker in line for marker in ("refused", "could not fully enumerate", "could not parse", "not swept")):
+    if any(
+        marker in line
+        for marker in (
+            "refused",
+            "could not fully enumerate",
+            "could not parse",
+            "not swept",
+            # The wildcard trust line (`_trust_line`): a specific finding, not
+            # a clean read that an unattributed refusal could be hiding
+            # behind. Replacing it with "unconfirmed" would delete the widest
+            # thing this note has to say about the account.
+            "wildcard principal",
+        )
+    ):
         return line
     label = line.split(":", 1)[0].removeprefix("  - ")
     return (
@@ -406,7 +459,14 @@ def _accounts_swept_section(perimeter: dict[str, Any]) -> list[str]:
             out.append(f"- **{account_id}**")
             out.append(_withhold_if_uncertain(_idp_line(idp_refused, _found(evidence, _IDP_FOUND_KEYS)), has_residual))
             out.append(
-                _withhold_if_uncertain(_trust_line(trust_refused, _found(evidence, (_TRUST_FOUND_KEY,))), has_residual)
+                _withhold_if_uncertain(
+                    _trust_line(
+                        trust_refused,
+                        _found(evidence, _TRUST_FOUND_KEYS),
+                        _found(evidence, (_TRUST_WILDCARD_KEY,)),
+                    ),
+                    has_residual,
+                )
             )
             out.append(
                 _withhold_if_uncertain(
@@ -508,10 +568,25 @@ def _accounts_swept_section(perimeter: dict[str, Any]) -> list[str]:
             "organisation appears below exactly as a third party would. Check each against "
             "your own account list before treating it as one.",
             "",
+            'One entry is not a subtraction at all: a role whose trust policy names `"*"` '
+            "restricts its principal to no account, so there is nothing to subtract and "
+            "nothing to look up. It is listed here because no table can name a counterparty "
+            "the policy never named. Whether anyone outside can really assume such a role "
+            "depends on the statement's conditions, which this tool does not evaluate — it "
+            "reads `sts:ExternalId` and nothing else out of them.",
+            "",
         ]
         for entry in unnamed_principals:
             account_id, role_name, has_external_id = entry
             condition = "with" if has_external_id else "without"
+            if account_id == _ANY_ACCOUNT:
+                out.append(
+                    f'- Role `{role_name}` names the **wildcard principal `"*"`**: its trust policy '
+                    f"restricts standing access to no account, so no table could name a counterparty "
+                    f"for it ({condition} an `sts:ExternalId` condition — an external ID is a shared "
+                    f"string, not an identity)."
+                )
+                continue
             out.append(
                 f"- Account `{account_id}` could not name a vendor: it has standing access via "
                 f"role `{role_name}` ({condition} an `sts:ExternalId` condition)."
@@ -578,7 +653,20 @@ def to_markdown(
     swept_accounts: list[str] = list(perimeter.get("swept_accounts") or [])
     aws_sweep_configured = bool(perimeter.get("aws_sweep_configured"))
     ce_refusal = next((line for line in clickops_refused if line.startswith(_COST_EXPLORER_PREFIX)), None)
-    marketplace_refusal = next((line for line in clickops_refused if line.startswith(_MARKETPLACE_PREFIX)), None)
+    # An ambiguous-seller line also starts with `_MARKETPLACE_PREFIX`, and it
+    # is not a refused call: the response arrived, every other seller in it
+    # still became a fact, and one key was left unfilled. Reporting it as
+    # "refused" would say the billing channel could not be read, which the
+    # rest of the same register contradicts.
+    ambiguous_sellers = [line for line in clickops_refused if line.startswith(_AMBIGUOUS_SELLER_PREFIX)]
+    marketplace_refusal = next(
+        (
+            line
+            for line in clickops_refused
+            if line.startswith(_MARKETPLACE_PREFIX) and not line.startswith(_AMBIGUOUS_SELLER_PREFIX)
+        ),
+        None,
+    )
 
     if not aws_read:
         clickops_line = "not read"
@@ -606,6 +694,11 @@ def to_markdown(
         marketplace_line = "not read"
     elif marketplace_refusal:
         marketplace_line = f"refused — {marketplace_refusal}"
+    elif ambiguous_sellers:
+        marketplace_line = (
+            f"read, and {len(ambiguous_sellers)} vendor key(s) were left unfilled because more than one "
+            f"seller name on the bill reduces to each — {'; '.join(ambiguous_sellers)}"
+        )
     else:
         marketplace_line = "read"
 

@@ -929,6 +929,33 @@ class TestAwsSweepWiring:
         # legal name, not the raw provider key, is what should land in 0050.
         assert "Okta, Inc." in names
 
+    def test_a_sources_file_with_no_states_key_at_all_still_scans(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """C6, end to end: the design's second headline scenario is no IaC and
+        several accounts. Written the obvious way — an `aws:` block and
+        nothing else — it used to die at `load_sources` before a single AWS
+        call was made."""
+        monkeypatch.setattr(cli_module, "collect_organization", lambda **k: self._org("111122223333"))
+        monkeypatch.setattr(cli_module, "collect_annual_expense", lambda **k: self._expense())
+        monkeypatch.setattr(cli_module, "collect_marketplace", lambda **k: ([], []))
+
+        calls: list[dict] = []
+
+        def fake_sweep(**kwargs: object):
+            calls.append(kwargs)
+            return [], []
+
+        monkeypatch.setattr(cli_module, "collect_clickops", fake_sweep)
+
+        sources_file = tmp_path / "sources.yaml"
+        sources_file.write_text("aws:\n  profile: management\n  assume_role_name: DoraRoiReadOnly\n")
+
+        result = runner.invoke(app, ["scan", "-o", str(tmp_path), "--aws", "--sources", str(sources_file)])
+
+        assert result.exit_code == 0, result.output
+        assert [call["account_id"] for call in calls] == ["111122223333"]
+
     def test_assume_role_name_sweeps_every_organization_account(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -1189,8 +1216,193 @@ class TestAwsSweepAccounting:
 
         assert [account_id for account_id, _ in sources.swept_accounts] == ["unknown account", "unknown account"]
         assert len(sources.swept_evidence) == 2
-        assert {p.name for p in sources.swept_evidence[0]} == {"okta"}
-        assert {p.name for p in sources.swept_evidence[1]} == {"datadog"}
+        # Evidence keys, not providers: an `ExternalPrincipal` is a trust-channel
+        # finding that never becomes a provider, so the account's evidence has to
+        # be able to carry it (finding C2). The two accounts used different
+        # channels, and that distinction is what must survive.
+        assert sources.swept_evidence[0] == ["saml_provider"]
+        assert sources.swept_evidence[1] == ["assume_role_trust"]
+
+
+class TestCheckPrintsEveryFinding:
+    """C5: `check` rendered `findings[:40]` and pointed at gap-report.json for
+    the rest, which holds `GapEntry` rows and never held a `Finding`. Findings
+    sort blocking-first and completeness emits one blocking finding per
+    mandatory-missing field per row, so on an un-overlaid register the
+    warnings — the unnamed external principals this branch exists to
+    surface — all fell past the cap."""
+
+    def _prefill(self, path: Path, rows: int) -> None:
+        path.mkdir(parents=True, exist_ok=True)
+        (path / "roi_prefill.json").write_text(
+            json.dumps(
+                {
+                    "generated_by": "dora-roi test",
+                    "perimeter": {
+                        "unnamed_principals": [["999988887777", "MysteryRoleAlpha", False]],
+                    },
+                    "templates": {
+                        "B_05.01": [
+                            {"source_key": f"vendor{index}", "values": {"0050": f"Vendor {index}"}, "provenance": {}}
+                            for index in range(rows)
+                        ]
+                    },
+                }
+            )
+        )
+
+    def test_a_warning_past_the_fortieth_finding_is_still_printed(self, tmp_path: Path) -> None:
+        import re
+
+        self._prefill(tmp_path, rows=8)
+        output = runner.invoke(app, ["check", "-o", str(tmp_path)], env={"COLUMNS": "220"}).output
+
+        counts = re.search(r"(\d+) blocking .* (\d+) warning", output)
+        assert counts, output
+        assert int(counts.group(1)) + int(counts.group(2)) > 40, (
+            "this fixture must exceed the old cap to prove anything"
+        )
+        assert "MysteryRoleAlpha" in output
+
+    def test_it_no_longer_sends_the_reader_to_a_file_without_the_findings(self, tmp_path: Path) -> None:
+        self._prefill(tmp_path, rows=8)
+        output = runner.invoke(app, ["check", "-o", str(tmp_path)], env={"COLUMNS": "220"}).output
+
+        assert "gap-report.json" not in output
+        assert "more." not in output
+
+
+class TestRegionsHandedToTheSweep:
+    """C3: `_collect_aws` builds the EventBridge region set from the providers
+    it has discovered so far. Taking every region string in them pointed the
+    sweep at other clouds' regions, and the resulting connection failure was
+    reported as an AWS refusal."""
+
+    def _sources(self):
+        from dora_roi.cli import _Sources
+        from dora_roi.collectors.sources import AwsAccount, AwsSweep
+
+        return _Sources(
+            states=[],
+            aws=True,
+            aws_sweep=AwsSweep(accounts=(AwsAccount(id="444455556666", profile="member"),)),
+        )
+
+    def _discovered(self):
+        from dora_roi.collectors.tfstate import DiscoveredProvider
+
+        return [
+            DiscoveredProvider(
+                name="aws", namespace="hashicorp", registry="r", resource_count=1, regions={"eu-west-1"}
+            ),
+            DiscoveredProvider(
+                name="digitalocean", namespace="digitalocean", registry="r", resource_count=1, regions={"nyc3"}
+            ),
+        ]
+
+    def _run(self, monkeypatch: pytest.MonkeyPatch, discovered: list) -> list[dict]:
+        from datetime import date
+
+        from dora_roi.cli import _collect_aws
+        from dora_roi.collectors.aws import DiscoveredAccount, ExpenseReport, OrganizationInventory
+
+        org = OrganizationInventory(
+            organization_id="o-x",
+            master_account_id="111122223333",
+            accounts=[
+                DiscoveredAccount(
+                    account_id="111122223333", name="root", email=None, status="ACTIVE", ou_path=("Root",)
+                )
+            ],
+        )
+        monkeypatch.setattr(cli_module, "collect_organization", lambda **k: org)
+        monkeypatch.setattr(
+            cli_module,
+            "collect_annual_expense",
+            lambda **k: ExpenseReport(currency=None, by_service={}, period=(date(2025, 8, 1), date(2026, 8, 1))),
+        )
+        monkeypatch.setattr(cli_module, "collect_marketplace", lambda **k: ([], []))
+        calls: list[dict] = []
+
+        def fake_sweep(**kwargs: object):
+            calls.append(kwargs)
+            return [], []
+
+        monkeypatch.setattr(cli_module, "collect_clickops", fake_sweep)
+        from dora_roi.models.templates import ThirdPartyProvider
+
+        rows = [ThirdPartyProvider(source_key=provider.name) for provider in discovered]
+        sources = self._sources()
+        _collect_aws(discovered, rows, {}, sources)
+        self.refused = sources.clickops_refused
+        return calls
+
+    def test_only_the_aws_regions_reach_the_sweep(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        calls = self._run(monkeypatch, self._discovered())
+        assert calls[0]["regions"] == frozenset({"eu-west-1"})
+
+    def test_a_foreign_region_is_not_reported_as_an_aws_refusal(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The consequence the finding is really about: `nyc3` produced
+        `"<acct>/nyc3 eventbridge: ... denied"`, which every surface renders
+        as AWS having refused something. AWS was never asked."""
+        self._run(monkeypatch, self._discovered())
+        assert not [line for line in self.refused if "nyc3" in line]
+
+    def test_an_estate_with_no_aws_region_at_all_says_so_instead(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from dora_roi.collectors.tfstate import DiscoveredProvider
+
+        only_other_clouds = [
+            DiscoveredProvider(
+                name="digitalocean", namespace="digitalocean", registry="r", resource_count=1, regions={"nyc3"}
+            )
+        ]
+        calls = self._run(monkeypatch, only_other_clouds)
+
+        assert calls[0]["regions"] == frozenset()
+        assert [line for line in self.refused if line.startswith("eventbridge: no regions known")]
+
+
+class TestChannelEvidence:
+    """C2: `swept_evidence` decides whether methodology.md calls an account's
+    cross-account trust line "read" or "read, no result". A trust policy that
+    produces a declared unknown rather than a named vendor produces no
+    provider at all, so evidence read off providers alone was empty — and the
+    note said the account had nothing in it."""
+
+    def _provider(self, name: str, kind: str):
+        from collections import Counter
+
+        from dora_roi.collectors.tfstate import DiscoveredProvider
+
+        return DiscoveredProvider(
+            name=name, namespace="aws", registry="aws-trust", resource_count=1, resource_types=Counter({kind: 1})
+        )
+
+    def test_a_named_vendor_still_reports_its_own_channel_key(self) -> None:
+        from dora_roi.cli import _channel_evidence
+
+        assert _channel_evidence([self._provider("datadog", "assume_role_trust")], []) == ["assume_role_trust"]
+
+    def test_an_unnamed_principal_is_evidence_even_with_no_provider(self) -> None:
+        from dora_roi.cli import _channel_evidence
+        from dora_roi.collectors.clickops import ExternalPrincipal
+
+        principal = ExternalPrincipal(account_id="999988887777", role_name="MysteryRole", has_external_id=False)
+        assert _channel_evidence([], [principal]) == ["external_principal"]
+
+    def test_a_wildcard_principal_is_marked_apart_from_an_unnamed_one(self) -> None:
+        from dora_roi.cli import _channel_evidence
+        from dora_roi.collectors.clickops import ExternalPrincipal
+
+        wildcard = ExternalPrincipal(account_id="*", role_name="PublicRole", has_external_id=False)
+        assert _channel_evidence([], [wildcard]) == ["external_principal", "wildcard_trust_principal"]
+
+    def test_an_account_with_nothing_has_no_evidence(self) -> None:
+        """The negative case: an empty account must stay empty, or every
+        account would read as "found something"."""
+        from dora_roi.cli import _channel_evidence
+
+        assert _channel_evidence([], []) == []
 
 
 class TestUnnamedPrincipalsReachCheckAndExport:
@@ -1243,6 +1455,24 @@ class TestUnnamedPrincipalsReachCheckAndExport:
         output = runner.invoke(app, ["check", "-o", str(tmp_path)]).output
         assert "999988887777" in output
         assert "MysteryRole" in output
+
+    def test_a_wildcard_principal_survives_the_round_trip_to_check(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """C2, end to end: `*` goes into `perimeter.unnamed_principals` as an
+        account id and has to come back out of the JSON as the wildcard
+        finding, not as an account called "*"."""
+        from dora_roi.collectors.clickops import ExternalPrincipal
+
+        principal = ExternalPrincipal(account_id="*", role_name="PublicRole", has_external_id=False)
+        self._scan(tmp_path, monkeypatch, [principal])
+
+        prefill = json.loads((tmp_path / "roi_prefill.json").read_text())
+        assert ["*", "PublicRole", False] in [list(entry) for entry in prefill["perimeter"]["unnamed_principals"]]
+
+        output = runner.invoke(app, ["check", "-o", str(tmp_path)], env={"COLUMNS": "220"}).output
+        assert "PublicRole" in output
+        assert "restricted to no AWS account" in output
 
     def test_with_no_recorded_principal_check_says_nothing_about_one(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1436,6 +1666,28 @@ class TestConsolePerimeterSurface:
         # `describe()` printed for exactly this scenario.
         assert "Refused (" not in output
         assert "channel refused" not in output.lower()
+
+    def test_print_perimeter_files_an_ambiguous_seller_apart_from_a_failed_call(
+        self, capsys: pytest.CaptureFixture
+    ) -> None:
+        """C1: two Marketplace names reducing to one key is not a call that
+        failed — the response arrived, and every other seller in it still
+        became a fact. Filing it under "Unavailable" would say the billing
+        channel could not be read, next to the rows it did produce."""
+        from dora_roi.cli import _print_perimeter
+
+        sources = self._sweep_sources()
+        sources.clickops_refused.append(
+            "marketplace: ambiguous seller: 2 names on the Marketplace bill reduce to the vendor key "
+            "'datadog' — 'Datadog, Inc.' (4200.00 USD), 'Datadog International Ltd' (99.00 USD)."
+        )
+        _print_perimeter(sources, gleif=False)
+        output = capsys.readouterr().out
+
+        assert "Answered, but not filled (1)" in output
+        assert "Unavailable (" not in output
+        assert "Refused (" not in output
+        assert "Datadog International Ltd" in output
 
     def test_print_perimeter_does_not_call_an_unreached_account_a_refusal(self, capsys: pytest.CaptureFixture) -> None:
         """R2: an account whose session never came up was never read at all —

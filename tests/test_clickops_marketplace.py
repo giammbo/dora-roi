@@ -222,6 +222,142 @@ class TestMarketplaceSellers:
         assert {f.key for f in facts} == {"datadog", "snyk"}
         stubber.assert_no_pending_responses()
 
+
+class TestTwoSellerNamesUnderOneKey:
+    """C1: `_totals_by_seller` groups by the raw `LEGAL_ENTITY_NAME` and
+    `vendor_key` then folds the legal form away, so `'Datadog, Inc.'` and
+    `'Datadog International Ltd'` arrive as two totals and leave as one key.
+    Emitting a fact per name meant `cli._apply_vendor_facts`'s `{fact.key:
+    fact}` kept whichever came last and dropped the other's spend without a
+    word — a FILLED annual expense that is a fraction of the bill.
+    """
+
+    def test_neither_colliding_seller_becomes_a_fact(self, stubbed) -> None:
+        client, stubber = stubbed
+        stubber.add_response(
+            "get_cost_and_usage",
+            _ce_response([("Datadog, Inc.", "4200.00"), ("Datadog International Ltd", "99.00")]),
+        )
+        stubber.activate()
+
+        refused: list[str] = []
+        providers, facts = collect_marketplace(client=client, refused=refused, today=date(2026, 8, 22))
+
+        assert facts == []
+        assert [p.name for p in providers] == ["datadog"]
+        assert len(refused) == 1
+
+    def test_the_refusal_names_both_sellers_and_both_amounts(self, stubbed) -> None:
+        """The two numbers are the whole point: a reader has to be able to see
+        that 4200.00 was never the whole of it."""
+        client, stubber = stubbed
+        stubber.add_response(
+            "get_cost_and_usage",
+            _ce_response([("Datadog, Inc.", "4200.00"), ("Datadog International Ltd", "99.00")]),
+        )
+        stubber.activate()
+
+        refused: list[str] = []
+        collect_marketplace(client=client, refused=refused, today=date(2026, 8, 22))
+
+        message = refused[0]
+        assert "'Datadog, Inc.' (4200.00 USD)" in message
+        assert "'Datadog International Ltd' (99.00 USD)" in message
+        assert "'datadog'" in message
+
+    def test_one_ambiguous_key_does_not_cost_the_other_sellers_their_facts(self, stubbed) -> None:
+        """Narrower than the mixed-currency precedent, which refuses the whole
+        response: this ambiguity is confined to one key, and Snyk's own fact is
+        not in doubt because Datadog's is."""
+        client, stubber = stubbed
+        stubber.add_response(
+            "get_cost_and_usage",
+            _ce_response(
+                [
+                    ("Datadog, Inc.", "4200.00"),
+                    ("Datadog International Ltd", "99.00"),
+                    ("Snyk Limited", "20.00"),
+                ]
+            ),
+        )
+        stubber.activate()
+
+        refused: list[str] = []
+        providers, facts = collect_marketplace(client=client, refused=refused, today=date(2026, 8, 22))
+
+        assert [(f.key, f.annual_spend) for f in facts] == [("snyk", Decimal("20.00"))]
+        assert sorted(p.name for p in providers) == ["datadog", "snyk"]
+
+    def test_the_ambiguous_vendor_is_still_reported_as_a_provider(self, stubbed) -> None:
+        """A counterparty seen on the bill must not disappear from the register
+        because the tool cannot say which of two names it files under."""
+        client, stubber = stubbed
+        stubber.add_response(
+            "get_cost_and_usage",
+            _ce_response([("Confluent Inc", "10.00"), ("Confluent International Ltd", "20.00")]),
+        )
+        stubber.activate()
+
+        providers, _ = collect_marketplace(client=client, refused=[], today=date(2026, 8, 22))
+
+        assert len(providers) == 1
+        assert providers[0].name == "confluent"
+        assert providers[0].resource_types["marketplace_subscription"] == 2
+        assert providers[0].resource_count == 2
+
+    def test_one_seller_respelled_across_the_window_is_the_same_collision(self, stubbed) -> None:
+        """It does not take two legal entities. `Datadog Inc` in March and
+        `Datadog, Inc.` in April are two `LEGAL_ENTITY_NAME` groups and one
+        key."""
+        client, stubber = stubbed
+        payload = _ce_response([("Datadog Inc", "10.00")])
+        payload["ResultsByTime"].append(_ce_response([("Datadog, Inc.", "5.00")])["ResultsByTime"][0])
+        stubber.add_response("get_cost_and_usage", payload)
+        stubber.activate()
+
+        refused: list[str] = []
+        _, facts = collect_marketplace(client=client, refused=refused, today=date(2026, 8, 22))
+
+        assert facts == []
+        assert refused and "ambiguous seller" in refused[0]
+
+    def test_the_same_name_billed_twice_is_not_a_collision(self, stubbed) -> None:
+        """The negative case for the test above: one name across two months is
+        one seller, and must still produce its fact with both months summed."""
+        client, stubber = stubbed
+        payload = _ce_response([("Datadog, Inc.", "10.00")])
+        payload["ResultsByTime"].append(_ce_response([("Datadog, Inc.", "5.00")])["ResultsByTime"][0])
+        stubber.add_response("get_cost_and_usage", payload)
+        stubber.activate()
+
+        refused: list[str] = []
+        _, facts = collect_marketplace(client=client, refused=refused, today=date(2026, 8, 22))
+
+        assert [(f.legal_name, f.annual_spend) for f in facts] == [("Datadog, Inc.", Decimal("15.00"))]
+        assert refused == []
+
+    def test_the_refusal_is_classified_as_answered_not_as_a_failed_call(self, stubbed) -> None:
+        """Cross-module lock: `methodology.refusal_kind` spells this prefix out
+        for itself, so the two copies have to be checked against each other or
+        the console files this under "Unavailable" — a claim that the billing
+        call could not be made, next to the facts it did produce."""
+        from dora_roi.report.methodology import refusal_kind
+
+        client, stubber = stubbed
+        stubber.add_response(
+            "get_cost_and_usage",
+            _ce_response([("Datadog, Inc.", "1.00"), ("Datadog International Ltd", "2.00")]),
+        )
+        stubber.activate()
+
+        refused: list[str] = []
+        collect_marketplace(client=client, refused=refused, today=date(2026, 8, 22))
+
+        assert refusal_kind(refused[0]) == "ambiguous"
+        assert refusal_kind("marketplace: ce:GetCostAndUsage unavailable (X: y)") == "unavailable"
+
+
+class TestMarketplaceCredentials:
     def test_a_bad_profile_degrades_the_channel_instead_of_killing_the_scan(self) -> None:
         """Client construction must sit inside the same no-raise guard as the AWS
         call: a typo in sources.yaml's `aws:` profile is not a reason to hand

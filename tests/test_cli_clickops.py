@@ -26,6 +26,7 @@ def test_a_marketplace_fact_fills_the_legal_name() -> None:
                 key="datadog", legal_name="Datadog, Inc.", annual_spend=Decimal("4200"), currency="USD", source="aws:ce"
             )
         ],
+        [],
     )
 
     assert row.legal_name == "Datadog, Inc."
@@ -35,7 +36,9 @@ def test_a_marketplace_fact_fills_the_legal_name() -> None:
 def test_a_fact_for_a_vendor_with_no_row_changes_nothing() -> None:
     row = ThirdPartyProvider(source_key="aws")
     _apply_vendor_facts(
-        [row], [VendorFact(key="snyk", legal_name="Snyk Limited", annual_spend=None, currency=None, source="aws:ce")]
+        [row],
+        [VendorFact(key="snyk", legal_name="Snyk Limited", annual_spend=None, currency=None, source="aws:ce")],
+        [],
     )
     assert row.status_of("legal_name") is not FieldStatus.FILLED
 
@@ -49,9 +52,57 @@ def test_the_overlay_still_wins_over_a_billing_fact() -> None:
     _apply_vendor_facts(
         [row],
         [VendorFact(key="datadog", legal_name="Datadog, Inc.", annual_spend=None, currency=None, source="aws:ce")],
+        [],
     )
 
     assert row.legal_name == "Datadog International Ltd"
+
+
+def test_two_facts_under_one_key_fill_nothing_and_say_so() -> None:
+    """C1, second line of defence. `collect_marketplace` refuses this pair at
+    the source, so nothing in the shipped pipeline reaches here — but a
+    `{fact.key: fact}` comprehension would resolve it by iteration order if a
+    second producer of facts ever appeared, which is the defect itself."""
+    row = ThirdPartyProvider(source_key="datadog")
+    refused: list[str] = []
+
+    _apply_vendor_facts(
+        [row],
+        [
+            VendorFact(
+                key="datadog", legal_name="Datadog, Inc.", annual_spend=Decimal("4200"), currency="USD", source="aws:ce"
+            ),
+            VendorFact(
+                key="datadog",
+                legal_name="Datadog International Ltd",
+                annual_spend=Decimal("99"),
+                currency="USD",
+                source="aws:ce",
+            ),
+        ],
+        refused,
+    )
+
+    assert row.status_of("legal_name") is not FieldStatus.FILLED
+    assert row.status_of("total_annual_expense") is not FieldStatus.FILLED
+    assert row.total_annual_expense is None
+    assert refused and "Datadog, Inc." in refused[0] and "Datadog International Ltd" in refused[0]
+
+
+def test_the_same_fact_arriving_twice_is_not_a_collision() -> None:
+    """The negative case: one seller, one key, applied — not withheld because
+    the list happened to carry it twice."""
+    row = ThirdPartyProvider(source_key="datadog")
+    fact = VendorFact(
+        key="datadog", legal_name="Datadog, Inc.", annual_spend=Decimal("4200"), currency="USD", source="aws:ce"
+    )
+    refused: list[str] = []
+
+    _apply_vendor_facts([row], [fact, fact], refused)
+
+    assert row.status_of("legal_name") is FieldStatus.FILLED
+    assert row.total_annual_expense == Decimal("4200")
+    assert refused == []
 
 
 #: A real SAML metadata shape, same as tests/test_clickops_idp.py: padded past

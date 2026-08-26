@@ -34,9 +34,11 @@ from dora_roi.collectors.aws import (
     expense_for_provider,
 )
 from dora_roi.collectors.clickops import (
+    ANY_ACCOUNT,
     ClickopsError,
     ExternalPrincipal,
     VendorFact,
+    aws_regions,
     collect_clickops,
     collect_marketplace,
 )
@@ -96,8 +98,9 @@ DISCLAIMER = (
 PERIMETER_WARNING = (
     "The channels named above are the whole of this run's scope; nothing outside them was "
     "attempted. Being in scope is not the same as having been read cleanly — every entry those channels "
-    "recorded (refused, unparseable, unreached, unattempted or unavailable) is printed above under one of "
-    "those headings, in full and by name, never folded silently into a clean read. A vendor that leaves no trace "
+    "recorded (refused, unparseable, unreached, unattempted, unavailable, or answered without a usable "
+    "answer) is printed above under one of those headings, in full and by name, never folded silently "
+    "into a clean read. A vendor that leaves no trace "
     "anywhere in scope — a SaaS bought on a card, a contract with no infrastructure footprint at all — "
     "is exactly as invisible to this tool as it always was: discovering more here changes how much of "
     "the visible estate this tool can read, not the size of what it cannot. This register does not "
@@ -384,7 +387,18 @@ def _check(output: Path, fail_on: str, use_gleif: bool) -> None:
     table.add_column("Field")
     table.add_column("Row")
     table.add_column("What")
-    for finding in findings[:40]:
+    # Every finding, never a capped slice. The cap that used to sit here
+    # printed the first 40 and pointed at gap-report.json for the rest, which
+    # holds `GapEntry` rows and has never held a `Finding` at all — so the
+    # remainder was not anywhere the user was sent. And findings sort
+    # blocking-first, while `_check_completeness` emits one blocking finding
+    # per mandatory-missing field per row: on any register that has not been
+    # overlaid yet, every warning this command has to give — an unnamed
+    # external principal, a wildcard trust — fell past the cap (finding C5).
+    # `_print_refusals` reached the same conclusion one round earlier, for
+    # the same reason: a long list is the honest cost of declaring
+    # everything, not a reason to hide part of it.
+    for finding in findings:
         colour = "red" if finding.severity is Severity.BLOCKING else "yellow"
         table.add_row(
             f"[{colour}]{finding.severity}[/{colour}]",
@@ -394,8 +408,6 @@ def _check(output: Path, fail_on: str, use_gleif: bool) -> None:
             finding.message,
         )
     console.print(table)
-    if len(findings) > 40:
-        console.print(f"[dim]… and {len(findings) - 40} more. The full list is in gap-report.json.[/dim]")
 
     console.print(f"\n[red]{summary['blocking']} blocking[/red] · [yellow]{summary['warning']} warning[/yellow]")
     if summary["blocking"]:
@@ -497,10 +509,14 @@ class _Sources:
     #: silently misfiled the refusal under the wrong account and rendered a
     #: denied call as a clean empty result.
     swept_accounts: list[tuple[str, list[str]]] = field(default_factory=list)
-    #: The raw, unmerged providers `collect_clickops` returned for one
-    #: account, before `_fold_in` folds them into the shared, cross-account
-    #: register — one entry per account, positionally aligned with
-    #: `swept_accounts` (index *i* here is that account's own evidence).
+    #: What `collect_clickops` found in one account, as the evidence keys
+    #: `_channel_evidence` derives from its own unmerged result — one entry
+    #: per account, positionally aligned with `swept_accounts` (index *i*
+    #: here is that account's own evidence). Keys, not providers: an
+    #: `ExternalPrincipal` is a finding of the trust channel that never
+    #: becomes a provider at all, and a list of providers has nowhere to
+    #: put it (finding C2).
+    #:
     #: A list, not a dict keyed by account_id: `account_id` is not
     #: guaranteed unique (two profile-only sweep entries with neither `id`
     #: nor `role_arn` both fall back to the literal string "unknown
@@ -516,7 +532,7 @@ class _Sources:
     #: note needs that association kept apart, per account, or two accounts
     #: sharing one vendor render as if each had every channel the other
     #: actually used.
-    swept_evidence: list[list[DiscoveredProvider]] = field(default_factory=list)
+    swept_evidence: list[list[str]] = field(default_factory=list)
     #: (account_id, message) for every account named to be swept whose
     #: session could never be established at all — a `boto3.Session` that
     #: failed to construct, or a `role_arn` that could not be assumed. Kept
@@ -925,7 +941,12 @@ def _collect_aws(
                 "aws sweep: assume_role_name is set but AWS Organizations was unreachable, so there is no "
                 "account list to assume it into."
             )
-        regions = frozenset(region for provider in discovered for region in provider.regions)
+        # AWS providers only, never every region-shaped string in the state:
+        # `tfstate._region_of` reads a `region` attribute off any resource of
+        # any provider, so a DigitalOcean `nyc3` would otherwise be handed to
+        # `events.nyc3.amazonaws.com` and come back reported as an AWS
+        # refusal (finding C3). See `clickops.aws_regions`.
+        regions = aws_regions(discovered)
         if not regions:
             # EventBridge is regional and this channel only ever sweeps regions
             # a state file (or Kubernetes) already named — see collect_clickops's
@@ -934,8 +955,9 @@ def _collect_aws(
             # sweep. Silence and "checked, found nothing" are opposite claims;
             # this is the former, and it must say so.
             sources.clickops_refused.append(
-                "eventbridge: no regions known (no state file or cluster named one), so partner event "
-                "sources were not swept in any account."
+                "eventbridge: no regions known to sweep — no AWS resource in the perimeter named one "
+                "(a region belonging to another cloud is not an AWS region and is never swept), so "
+                "partner event sources were not read in any account."
             )
         for sweep_account in accounts:
             account_id = sweep_account.id or sweep_account.role_arn or "unknown account"
@@ -984,10 +1006,39 @@ def _collect_aws(
                 sources.swept_accounts.append((account_id, account_refusals))
                 # Appended in lockstep with `swept_accounts`, never keyed by
                 # `account_id` — see the field's own docstring for why (R4).
-                sources.swept_evidence.append(list(swept))
+                sources.swept_evidence.append(_channel_evidence(swept, unknown))
 
-    _apply_vendor_facts(rows, facts)
+    _apply_vendor_facts(rows, facts, sources.clickops_refused)
     return entities
+
+
+#: Two evidence keys that are no provider's ``resource_types`` key, because
+#: the thing they record is not a provider row. A trust policy naming an
+#: outside account this tool cannot name produces an
+#: :class:`.clickops.ExternalPrincipal` and nothing else — so an account whose
+#: only trust finding is a declared unknown carried no evidence at all, and the
+#: methodology note rendered its cross-account trust line *read, no result*:
+#: the same sentence it prints for an account whose roles nobody outside can
+#: assume (finding C2). The second key separates the worst case of all, a role
+#: whose principal names no account at all, from an unnamed but specific one.
+_TRUST_UNNAMED_EVIDENCE = "external_principal"
+_TRUST_WILDCARD_EVIDENCE = "wildcard_trust_principal"
+
+
+def _channel_evidence(providers: list[DiscoveredProvider], unknown: list[ExternalPrincipal]) -> list[str]:
+    """What one account's own sweep actually found, as channel-attributable keys.
+
+    Computed here, next to the ``collect_clickops`` call that produced both
+    lists, rather than in :func:`_perimeter`: ``unknown`` never becomes a
+    provider, so by the time the perimeter is serialised there is nothing left
+    to derive it from.
+    """
+    keys = {key for provider in providers for key in provider.resource_types}
+    if unknown:
+        keys.add(_TRUST_UNNAMED_EVIDENCE)
+    if any(principal.account_id == ANY_ACCOUNT for principal in unknown):
+        keys.add(_TRUST_WILDCARD_EVIDENCE)
+    return sorted(keys)
 
 
 def _sweep_accounts(sweep: AwsSweep, organization: OrganizationInventory | None) -> list[AwsAccount]:
@@ -1038,7 +1089,7 @@ def _fold_in(
             rows.append(provider_to_tpp(provider, mapping))
 
 
-def _apply_vendor_facts(rows: list[ThirdPartyProvider], facts: list[VendorFact]) -> None:
+def _apply_vendor_facts(rows: list[ThirdPartyProvider], facts: list[VendorFact], refused: list[str]) -> None:
     """Turn authoritative billing facts into FILLED fields.
 
     This lives here and not in :func:`.mapping.provider_to_tpp` on purpose.
@@ -1056,10 +1107,35 @@ def _apply_vendor_facts(rows: list[ThirdPartyProvider], facts: list[VendorFact])
     asserts the legal name but never touched the expense (or the reverse)
     must not have the untouched field silently overwritten just because its
     sibling was already settled.
+
+    Two facts under one key would mean one of them never reaches a row, and a
+    dict comprehension over ``facts`` picks the last one without saying so.
+    :func:`.clickops.collect_marketplace` already groups by key and refuses
+    that case at the source, so this loop is not the place that decides it —
+    but it is the place that would silently absorb it if a second producer of
+    facts ever appeared, so the collision is dropped *and declared* here as
+    well rather than resolved by iteration order.
     """
-    by_key = {fact.key: fact for fact in facts}
+    by_key: dict[str, VendorFact] = {}
+    ambiguous: set[str] = set()
+    for candidate in facts:
+        clash = by_key.get(candidate.key)
+        if clash is not None and clash.legal_name != candidate.legal_name:
+            ambiguous.add(candidate.key)
+            refused.append(
+                f"marketplace: ambiguous seller: {clash.legal_name!r} and {candidate.legal_name!r} both "
+                f"reduce to the vendor key {candidate.key!r}, so neither was applied to a row — choosing one "
+                f"would report part of a bill as the whole of it. Reaching this line is a bug in dora-roi: "
+                f"the collector is supposed to have refused the pair already. Please report it."
+            )
+            continue
+        by_key[candidate.key] = candidate
+
     for row in rows:
-        fact = by_key.get(row.source_key or "")
+        key = row.source_key or ""
+        if key in ambiguous:
+            continue
+        fact = by_key.get(key)
         if fact is None:
             continue
 
@@ -1152,10 +1228,7 @@ def _perimeter(sources: _Sources, use_gleif: bool, overlay_file: Path | None = N
         # aligned with `swept_accounts` above — never a dict keyed by
         # account_id, which is not unique (R4; see `swept_evidence`'s own
         # docstring on `_Sources`).
-        "swept_evidence": [
-            sorted({key for provider in providers for key in provider.resource_types})
-            for providers in sources.swept_evidence
-        ],
+        "swept_evidence": [list(keys) for keys in sources.swept_evidence],
         "unreachable_accounts": list(sources.unreachable_accounts),
         "clickops_refused": list(sources.clickops_refused),
         "unnamed_principals": [
@@ -1294,6 +1367,14 @@ _REFUSAL_HEADINGS: dict[str, tuple[str, str]] = {
     # either into "Refused" (a review finding, N1) would claim more than
     # the exception that produced the line distinguishes.
     "unavailable": ("Unavailable", "credentials, connectivity and denials are not told apart here"),
+    # Nothing failed here: the Marketplace response arrived and named two
+    # sellers reducing to one vendor key, so the fact was withheld rather
+    # than resolved by picking one (finding C1). Filed apart from
+    # "Unavailable" because the call was made and answered.
+    "ambiguous": (
+        "Answered, but not filled",
+        "the call succeeded and its answer did not say which counterparty it belonged to",
+    ),
 }
 
 

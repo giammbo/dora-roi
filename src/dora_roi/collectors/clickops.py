@@ -39,6 +39,7 @@ from __future__ import annotations
 import json
 import re
 from collections import Counter
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal, InvalidOperation
@@ -48,7 +49,7 @@ from urllib.parse import unquote
 
 import yaml
 
-from dora_roi.collectors.aws import AwsError, annual_window, readonly
+from dora_roi.collectors.aws import AwsError, annual_window, cost_and_usage_pages, readonly
 from dora_roi.collectors.domains import vendor_for_host
 from dora_roi.collectors.tfstate import DiscoveredProvider
 from dora_roi.naming import vendor_key
@@ -59,9 +60,11 @@ else:
     CostExplorerClient = Any
 
 __all__ = [
+    "ANY_ACCOUNT",
     "ClickopsError",
     "ExternalPrincipal",
     "VendorFact",
+    "aws_regions",
     "collect_clickops",
     "collect_identity_providers",
     "collect_marketplace",
@@ -132,11 +135,15 @@ def collect_marketplace(
     a mistyped profile in the ``aws:`` block of the sources config raises
     ``ProfileNotFound`` from ``boto3`` before any request is even attempted,
     and that is a typo, not a reason to hand back no register at all.
+
+    Facts come back keyed by :func:`.naming.vendor_key`, one per key at most:
+    see :func:`_sellers_by_key` and :func:`_ambiguous_seller` for what happens
+    when two billed names reduce to the same one.
     """
     try:
         client = client if client is not None else _ce_client(profile)
         start, end = annual_window(today)
-        results = _all_results(
+        results = cost_and_usage_pages(
             client,
             TimePeriod={"Start": start.isoformat(), "End": end.isoformat()},
             Granularity="MONTHLY",
@@ -157,23 +164,26 @@ def collect_marketplace(
 
     providers: list[DiscoveredProvider] = []
     facts: list[VendorFact] = []
-    for legal_name, spend in sorted(totals.items()):
-        key = vendor_key(legal_name)
+    for key, names in sorted(_sellers_by_key(totals).items()):
         providers.append(
             DiscoveredProvider(
                 name=key,
                 namespace="aws-marketplace",
                 registry="aws-marketplace",
-                resource_count=1,
-                resource_types=Counter({"marketplace_subscription": 1}),
+                resource_count=len(names),
+                resource_types=Counter({"marketplace_subscription": len(names)}),
                 source_files={"aws:ce"},
             )
         )
+        if len(names) > 1:
+            refused.append(_ambiguous_seller(key, names, totals, currencies))
+            continue
+        legal_name = names[0]
         facts.append(
             VendorFact(
                 key=key,
                 legal_name=legal_name,
-                annual_spend=spend,
+                annual_spend=totals[legal_name],
                 currency=currencies.get(legal_name),
                 source="aws:ce",
             )
@@ -181,23 +191,72 @@ def collect_marketplace(
     return providers, facts
 
 
-def _all_results(client: CostExplorerClient, **kwargs: Any) -> list[dict[str, Any]]:
-    """Every page of ``get_cost_and_usage``, concatenated.
+def _sellers_by_key(totals: dict[str, Decimal]) -> dict[str, list[str]]:
+    """The seller names on the bill, grouped by the key they will be merged under.
 
-    Cost Explorer paginates a single grouped request over ``NextPageToken``
-    once the result set is large enough. A silently truncated page makes a
-    real seller vanish exactly the way a nonexistent one would — indistin-
-    guishable from the outside, which is the one failure this channel exists
-    to rule out, since it is the only channel that ever gets to say FILLED.
+    :func:`_totals_by_seller` groups by the raw ``LEGAL_ENTITY_NAME``;
+    :func:`.naming.vendor_key` then folds spelling and legal form away, so two
+    billed names can arrive here and leave as one key — ``'Datadog, Inc.'`` and
+    ``'Datadog International Ltd'`` both reduce to ``datadog``, and so do
+    ``'Confluent Inc'`` and ``'Confluent International Ltd'``. It does not take
+    two legal entities: one seller respelled halfway through the twelve-month
+    window is enough.
+
+    Grouping happens *here*, before a fact exists, because everything
+    downstream of a fact is keyed by exactly this key — ``merge_providers``
+    folds the rows together and ``cli._apply_vendor_facts`` looks a fact up by
+    it. Two facts under one key mean one of them is dropped, silently, and the
+    spend that survives is a fraction of the bill wearing this tool's strongest
+    label.
     """
-    results: list[dict[str, Any]] = []
-    token: str | None = None
-    while True:
-        page = readonly(client, "get_cost_and_usage", **kwargs, **({"NextPageToken": token} if token else {}))
-        results.extend(page.get("ResultsByTime", []))
-        token = page.get("NextPageToken")
-        if not token:
-            return results
+    grouped: dict[str, list[str]] = {}
+    for legal_name in sorted(totals):
+        grouped.setdefault(vendor_key(legal_name), []).append(legal_name)
+    return grouped
+
+
+#: What a refusal says when the Marketplace call answered and the answer named
+#: more than one seller for one key. Its own prefix, not the plain
+#: ``marketplace: `` one: nothing failed here, so the surfaces that group
+#: refusals by what they mean (`cli._print_refusals`, `methodology.refusal_kind`)
+#: must not file it under a billing call that could not be made.
+_AMBIGUOUS_SELLER_PREFIX = "marketplace: ambiguous seller"
+
+
+def _ambiguous_seller(key: str, names: list[str], totals: dict[str, Decimal], currencies: dict[str, str]) -> str:
+    """Refuse the fact for one key that more than one billed name reduces to.
+
+    Refused rather than resolved, on the precedent :func:`_totals_by_seller`
+    already sets one ambiguity earlier: a seller whose own lines mix currencies
+    raises instead of picking one, because the pick would be invented. The same
+    reasoning, one step later — summing these names would assert the two are one
+    legal entity, and keeping one would report part of a bill as the whole of
+    it. Both are answers this channel has no source for.
+
+    Narrower than that precedent on purpose: the currency clash makes the whole
+    response unusable, while this one is confined to a single key. Every other
+    seller in the same response is unaffected and still gets its fact, so the
+    refusal is scoped to the key rather than to the channel.
+
+    The provider row itself survives — these sellers *are* on the bill, and
+    dropping the row would hide a counterparty the tool saw. What it loses is
+    the FILLED legal name and the FILLED spend, which is exactly the part that
+    would have been a guess.
+    """
+    billed = ", ".join(f"{name!r} ({_money(totals[name], currencies.get(name))})" for name in names)
+    return (
+        f"{_AMBIGUOUS_SELLER_PREFIX}: {len(names)} names on the Marketplace bill reduce to the vendor key "
+        f"{key!r} — {billed}. This channel put no legal name and no annual expense on that row: adding the "
+        f"amounts would assert these names are one legal entity, and keeping one would report part of the "
+        f"bill as the whole of it. Whatever the row does show for those two fields came from elsewhere — "
+        f"the provider mapping, which is a table of guesses. Say which counterparty these names are in the "
+        f"overlay (`vendors.yaml`), where a human assertion is FILLED and this channel's guess never "
+        f"could be."
+    )
+
+
+def _money(amount: Decimal, currency: str | None) -> str:
+    return f"{amount} {currency}" if currency else str(amount)
 
 
 def _totals_by_seller(results: list[dict[str, Any]]) -> tuple[dict[str, Decimal], dict[str, str]]:
@@ -387,7 +446,7 @@ def _all_event_sources(client: Any) -> list[dict[str, Any]]:
     """Every EventBridge event source, walked to the end of ``list_event_sources``'s pagination.
 
     This API paginates with ``NextToken``, request and response alike — the
-    shape :func:`_all_results` already reads for Cost Explorer under a
+    shape :func:`.aws.cost_and_usage_pages` already reads for Cost Explorer under a
     differently-named field (``NextPageToken``), and a different shape again
     from IAM's ``Marker``/``IsTruncated`` pair that :func:`_all_roles` reads.
     Three APIs, three field names for "there is more": stopping at the first
@@ -493,6 +552,24 @@ _ACCOUNT_ARN = re.compile(r"^arn:aws[a-z-]*:iam::(\d{12}):")
 #: number with no ARN wrapper at all (``"Principal": {"AWS": "464622532012"}``).
 _BARE_ACCOUNT = re.compile(r"^\d{12}$")
 
+#: What IAM writes when a trust policy names no account at all:
+#: ``"Principal": "*"`` or ``"Principal": {"AWS": "*"}``. Whether every AWS
+#: account can in fact assume such a role is a separate question this module
+#: does not answer: a ``Condition`` on the same statement (``aws:PrincipalOrgID``
+#: is the common one) can narrow it, and this module reads only
+#: ``sts:ExternalId`` out of ``Condition`` — so what it records is the
+#: principal the policy names, never an effective-access verdict. Carried
+#: through this module as an
+#: :class:`ExternalPrincipal` whose ``account_id`` is this exact string, rather
+#: than as a fourth field on that class: every surface downstream —
+#: ``perimeter.unnamed_principals`` in ``roi_prefill.json``,
+#: :func:`.preflight.load_unnamed_principals`, the methodology note — already
+#: carries an account id from end to end, and one that is not a number is
+#: visible in all of them at once. Nothing can mistake it for a real account:
+#: no AWS account id contains a ``*``, and every surface that renders one
+#: branches on this constant explicitly.
+ANY_ACCOUNT = "*"
+
 
 @dataclass(frozen=True)
 class ExternalPrincipal:
@@ -506,6 +583,13 @@ class ExternalPrincipal:
     "an external account has standing access and we cannot say whose" in the
     methodology note and raise it as a finding — a true, actionable statement
     that a guessed vendor name never could have been.
+
+    ``account_id`` is :data:`ANY_ACCOUNT` — the literal ``*`` — when the trust
+    policy restricts the principal to no account at all. That is not a lesser
+    version of this finding but a wider one, and it used to produce nothing
+    whatsoever: ``*`` matches neither account regex, so the role vanished and
+    the methodology note rendered *Cross-account trust: read, no result* over
+    the broadest principal a trust policy can name (finding C2).
     """
 
     account_id: str
@@ -563,14 +647,34 @@ def _statements(policy: dict[str, Any]) -> list[dict[str, Any]]:
     return [s for s in statements if isinstance(s, dict) and s.get("Effect") == "Allow"]
 
 
+def _trusted_accounts(principal: Any) -> list[str]:
+    """Every account one ``Allow`` statement's ``Principal`` trusts.
+
+    Two shapes reach here. The documented one is a mapping, whose ``AWS`` key
+    holds the account principals. The other is the bare string ``"*"``, which
+    IAM accepts in place of the mapping and which restricts the principal to
+    no account at all: the first cut of this function required a mapping and
+    returned nothing for it, so a role naming that principal produced no
+    vendor, no unknown and no refusal (finding C2). Anything else — a mapping
+    with only a ``Service`` or ``Federated`` key, a list, a number — names no
+    AWS account and yields nothing, as before.
+    """
+    if isinstance(principal, str):
+        return _principal_accounts(principal)
+    if isinstance(principal, dict):
+        return _principal_accounts(principal.get("AWS"))
+    return []
+
+
 def _principal_accounts(principal: Any) -> list[str]:
     """Every distinct AWS account named by one statement's ``Principal.AWS``.
 
     That value arrives as a single string for one trusted principal or a list
-    for several; either way, only entries that actually resolve to a 12-digit
-    account (via :data:`_ACCOUNT_ARN` or :data:`_BARE_ACCOUNT`) survive here —
-    a service principal or a malformed entry is silently not an account,
-    the same way :func:`_account_of` treats anything else it cannot parse.
+    for several; either way, only entries that resolve to a 12-digit account
+    (via :data:`_ACCOUNT_ARN` or :data:`_BARE_ACCOUNT`) or to the ``*``
+    wildcard survive here — a service principal or a malformed entry is
+    silently not an account, the same way :func:`_account_of` treats anything
+    else it cannot parse.
     """
     raw = principal if isinstance(principal, list) else [principal]
     accounts = []
@@ -584,13 +688,21 @@ def _principal_accounts(principal: Any) -> list[str]:
 
 
 def _account_of(principal: str) -> str | None:
-    """The 12-digit account inside a principal, whether it arrived as an ARN or bare.
+    """The account inside a principal: an ARN's, a bare one, or all of them.
+
+    ``*`` returns :data:`ANY_ACCOUNT` rather than ``None``. It is the one
+    principal that names no account because it restricts to none, and
+    dropping it here is what made the broadest principal a trust policy can
+    name indistinguishable from a role nobody outside can assume (finding
+    C2).
 
     A principal can also be an AWS service name (``lambda.amazonaws.com``) or
     a federated identity ARN with no account-shaped segment in the position
     this regex checks; both fall through to ``None`` rather than being
     mistaken for a trusted outside account.
     """
+    if principal == ANY_ACCOUNT:
+        return ANY_ACCOUNT
     if _BARE_ACCOUNT.match(principal):
         return principal
     match = _ACCOUNT_ARN.match(principal)
@@ -619,7 +731,7 @@ def _all_roles(client: Any) -> list[dict[str, Any]]:
     """Every IAM role, walked to the end of ``list_roles``'s pagination.
 
     IAM signals more pages with ``IsTruncated`` plus a ``Marker`` to send back
-    on the next call — not the ``NextToken`` shape :func:`_all_results` reads
+    on the next call — not the ``NextToken`` shape :func:`.aws.cost_and_usage_pages` reads
     for Cost Explorer, or :func:`_all_event_sources` reads for EventBridge,
     and not :func:`.aws._pages`'s shape either, which is typed to the
     Organizations client specifically. IAM's default page size is 100 roles,
@@ -663,6 +775,11 @@ def collect_trust_relationships(
     trusted by a sibling account, or by the very account being scanned, is not
     a third party and must not appear as either a vendor or an unknown.
 
+    A role whose principal is ``*`` names no account for that subtraction to
+    work on and none for :func:`_vendor_accounts` to look up, so it comes back
+    as an :class:`ExternalPrincipal` whose ``account_id`` is
+    :data:`ANY_ACCOUNT`.
+
     Needs only ``iam:ListRoles``: unlike :func:`collect_identity_providers`,
     which pairs a ``List*`` and a ``Get*`` call per provider, ``list_roles``
     already returns each role's ``AssumeRolePolicyDocument`` inline. Walked to
@@ -692,12 +809,9 @@ def collect_trust_relationships(
             continue
 
         for statement in _statements(policy):
-            principal = statement.get("Principal")
-            if not isinstance(principal, dict):
-                continue
             has_external_id = _has_external_id(statement)
 
-            for trusted in _principal_accounts(principal.get("AWS")):
+            for trusted in _trusted_accounts(statement.get("Principal")):
                 if trusted in own_accounts or trusted == account_id:
                     continue
                 vendor = table.get(trusted)
@@ -721,6 +835,40 @@ def collect_trust_relationships(
                     existing.resource_count += 1
 
     return sorted(found.values(), key=lambda p: p.name), unknown
+
+
+#: Provider names whose ``region`` attribute holds an AWS region. Two, because
+#: ``awscc`` (AWS Cloud Control) addresses the same regions as ``aws`` does.
+#: Matched on the provider name rather than the registry host so a private
+#: mirror (``terraform.example.com/hashicorp/aws``) is still the AWS provider,
+#: and so the ``aws`` rows the Kubernetes collector produces for ECR — whose
+#: registry is ``k8s`` and whose namespace is empty — are included too, since
+#: an ECR hostname carries a real AWS region.
+_AWS_PROVIDER_NAMES = frozenset({"aws", "awscc"})
+
+
+def aws_regions(providers: Iterable[DiscoveredProvider]) -> frozenset[str]:
+    """The AWS regions in a set of discovered providers, and nothing else.
+
+    :func:`.tfstate._region_of` reads ``attributes["region"]`` off *any*
+    resource of *any* provider, so a state file with DigitalOcean, Scaleway,
+    Google or Linode resources in it contributes ``nyc3``, ``fr-par``,
+    ``europe-west1`` or ``us-east`` to that pool. Handing those to
+    :func:`collect_clickops` built an ``events`` client per string, botocore
+    resolved ``events.nyc3.amazonaws.com``, and the connection error came back
+    as ``"<acct>/nyc3 eventbridge: events:ListEventSources denied"`` — AWS
+    refused nothing; dora-roi asked a question that does not exist. Worse, one
+    such string refused the whole EventBridge channel for that account
+    (:func:`.methodology._eventbridge_line`), so a clean read in ``eu-west-1``
+    was masked by a region AWS never had.
+
+    Filtering by provider is what keeps this a statement about the perimeter
+    rather than about string shapes: a region belongs here because an AWS
+    resource named it, not because it looks like an AWS region.
+    """
+    return frozenset(
+        region for provider in providers if provider.name in _AWS_PROVIDER_NAMES for region in provider.regions
+    )
 
 
 def collect_clickops(

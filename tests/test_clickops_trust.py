@@ -18,7 +18,7 @@ import re
 import boto3
 from moto import mock_aws
 
-from dora_roi.collectors.clickops import collect_trust_relationships
+from dora_roi.collectors.clickops import ANY_ACCOUNT, collect_trust_relationships
 
 OWN = frozenset({"111122223333", "444455556666"})
 
@@ -247,17 +247,150 @@ class _EdgeShapedPolicies:
 
 
 def test_edge_shaped_principals_are_handled_without_crashing() -> None:
+    """The wildcard role used to be asserted *out* of this set — `accounts ==
+    {"999988887777", "888877776666"}` locked in that a role every AWS account
+    on earth can assume produced nothing at all, which is what let
+    `methodology._trust_line` print "read, no result" over it (finding C2)."""
     providers, unknown = collect_trust_relationships(
         _EdgeShapedPolicies(), account_id="111122223333", own_accounts=OWN, refused=[]
     )
 
     assert providers == []
     accounts = {u.account_id for u in unknown}
-    assert accounts == {"999988887777", "888877776666"}
+    assert accounts == {"999988887777", "888877776666", ANY_ACCOUNT}
     bare = next(u for u in unknown if u.account_id == "999988887777")
     assert bare.role_name == "BareAccountRole"
     odd_condition = next(u for u in unknown if u.account_id == "888877776666")
     assert odd_condition.has_external_id is False
+    wildcard = next(u for u in unknown if u.account_id == ANY_ACCOUNT)
+    assert wildcard.role_name == "WildcardPrincipalRole"
+
+
+class _WildcardShapes:
+    """The two ways a trust policy says "anybody". `{"AWS": "*"}` is the one
+    the IAM console and moto both accept (`tests/test_cli_clickops.py` creates
+    exactly it), and a bare `"Principal": "*"` is the shape a raw policy
+    document can carry. One role that trusts a real account sits alongside
+    them, so a test cannot pass by reporting everything as a wildcard."""
+
+    def list_roles(self, **kwargs: object) -> dict:
+        return {
+            "Roles": [
+                {
+                    "RoleName": "AwsKeyWildcardRole",
+                    "AssumeRolePolicyDocument": {
+                        "Version": "2012-10-17",
+                        "Statement": [{"Effect": "Allow", "Principal": {"AWS": "*"}, "Action": "sts:AssumeRole"}],
+                    },
+                },
+                {
+                    "RoleName": "ListedWildcardRole",
+                    "AssumeRolePolicyDocument": {
+                        "Version": "2012-10-17",
+                        "Statement": [
+                            {
+                                "Effect": "Allow",
+                                "Principal": {"AWS": ["*", "999988887777"]},
+                                "Action": "sts:AssumeRole",
+                                "Condition": {"StringEquals": {"sts:ExternalId": "shared-secret"}},
+                            }
+                        ],
+                    },
+                },
+                {
+                    "RoleName": "ServiceOnlyRole",
+                    "AssumeRolePolicyDocument": {
+                        "Version": "2012-10-17",
+                        "Statement": [
+                            {
+                                "Effect": "Allow",
+                                "Principal": {"Service": "lambda.amazonaws.com"},
+                                "Action": "sts:AssumeRole",
+                            }
+                        ],
+                    },
+                },
+            ]
+        }
+
+
+class _ListShapedPrincipal:
+    """`Principal` given as a list rather than a mapping or `"*"`. IAM does not
+    accept it, so it can only arrive from a hand-edited or corrupted document —
+    and it must name no account rather than being coerced into one."""
+
+    def list_roles(self, **kwargs: object) -> dict:
+        return {
+            "Roles": [
+                {
+                    "RoleName": "ListPrincipalRole",
+                    "AssumeRolePolicyDocument": {
+                        "Version": "2012-10-17",
+                        "Statement": [
+                            {
+                                "Effect": "Allow",
+                                "Principal": ["arn:aws:iam::999988887777:root"],
+                                "Action": "sts:AssumeRole",
+                            }
+                        ],
+                    },
+                }
+            ]
+        }
+
+
+def test_a_principal_that_is_neither_a_mapping_nor_a_wildcard_names_nobody() -> None:
+    providers, unknown = collect_trust_relationships(
+        _ListShapedPrincipal(), account_id="111122223333", own_accounts=OWN, refused=[]
+    )
+
+    assert (providers, unknown) == ([], [])
+
+
+class TestWildcardPrincipals:
+    def test_the_aws_key_wildcard_is_reported(self) -> None:
+        _, unknown = collect_trust_relationships(
+            _WildcardShapes(), account_id="111122223333", own_accounts=OWN, refused=[]
+        )
+
+        roles = {u.role_name for u in unknown if u.account_id == ANY_ACCOUNT}
+        assert roles == {"AwsKeyWildcardRole", "ListedWildcardRole"}
+
+    def test_a_wildcard_inside_a_list_does_not_hide_the_named_account_beside_it(self) -> None:
+        _, unknown = collect_trust_relationships(
+            _WildcardShapes(), account_id="111122223333", own_accounts=OWN, refused=[]
+        )
+
+        listed = {(u.account_id, u.role_name) for u in unknown if u.role_name == "ListedWildcardRole"}
+        assert listed == {(ANY_ACCOUNT, "ListedWildcardRole"), ("999988887777", "ListedWildcardRole")}
+
+    def test_a_service_principal_is_still_not_an_account(self) -> None:
+        """The negative half: `_trusted_accounts` now accepts a shape it used
+        to reject outright, and must not have started accepting every shape."""
+        _, unknown = collect_trust_relationships(
+            _WildcardShapes(), account_id="111122223333", own_accounts=OWN, refused=[]
+        )
+
+        assert "ServiceOnlyRole" not in {u.role_name for u in unknown}
+
+    def test_an_external_id_on_a_wildcard_is_recorded_not_treated_as_a_name(self) -> None:
+        _, unknown = collect_trust_relationships(
+            _WildcardShapes(), account_id="111122223333", own_accounts=OWN, refused=[]
+        )
+
+        conditioned = next(u for u in unknown if u.role_name == "ListedWildcardRole" and u.account_id == ANY_ACCOUNT)
+        plain = next(u for u in unknown if u.role_name == "AwsKeyWildcardRole")
+        assert conditioned.has_external_id is True
+        assert plain.has_external_id is False
+
+    def test_a_wildcard_never_becomes_a_named_vendor(self) -> None:
+        """Golden rule 1: `*` is not a lookup key, and the account table must
+        never be consulted with it."""
+        providers, _ = collect_trust_relationships(
+            _WildcardShapes(), account_id="111122223333", own_accounts=OWN, refused=[]
+        )
+
+        assert providers == []
 
 
 class _PaginatedRoles:

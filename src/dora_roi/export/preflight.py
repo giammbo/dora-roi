@@ -29,7 +29,7 @@ from typing import Any, Protocol
 
 from pydantic import ValidationError
 
-from dora_roi.collectors.clickops import ExternalPrincipal
+from dora_roi.collectors.clickops import ANY_ACCOUNT, ExternalPrincipal
 from dora_roi.models.enums import FieldStatus
 from dora_roi.models.templates import (
     FIELD_CATALOG,
@@ -546,36 +546,98 @@ def _check_unnamed_principals(unnamed_principals: Sequence[ExternalPrincipal]) -
 
     ``ExternalPrincipal`` does not record which of the scanned AWS accounts
     grants the access (a known, deferred gap in the collector), so the message
-    below does not claim to know that either.
+    below does not claim to know that either. Nor does it claim the account is
+    a third party: *outside* is decided by subtracting the accounts AWS
+    Organizations named, and on a run where that call was refused there is
+    nothing to subtract, so a sibling account in the filer's own organisation
+    reaches this function exactly as a vendor's would. ``methodology.md``
+    carries that caveat for the run that produced the prefill; ``check`` and
+    ``export`` read only ``roi_prefill.json``, whose perimeter records no
+    signal that Organizations failed, so the caveat travels in the message
+    itself rather than being left to a document this command never mentions
+    (finding C7).
+
+    An ``account_id`` of :data:`.clickops.ANY_ACCOUNT` is a different finding
+    with the same shape and gets its own code and its own sentence: the trust
+    policy named no counterparty because its principal restricts to no
+    account. It stays a WARNING rather than becoming BLOCKING because
+    *blocking* means "a filing built from this register is expected to be
+    refused" — this is a finding about the estate, not a defect in the
+    register's own fields.
     """
     return [
-        Finding(
-            code="UNIDENTIFIED_EXTERNAL_PRINCIPAL",
-            severity=Severity.WARNING,
-            message=(
-                f"AWS account {principal.account_id} can assume the role {principal.role_name!r} and no "
-                "table names it as a vendor: an external account has standing access and this register "
-                "cannot say whose it is."
-            ),
-            fix=(
-                f"Find out who controls AWS account {principal.account_id} and either add it to the "
-                "account-ID mapping or the overlay so it becomes a named provider row, or remove the "
-                "trust relationship if it is stale. dora-roi will not guess a legal name from a bare "
-                "account number — that would turn a hypothesis into a fact, which this tool's "
-                "provenance rule forbids."
-                + (
-                    ""
-                    if principal.has_external_id
-                    else " The trust also has no sts:ExternalId condition, so anyone who controls that "
-                    "account, not only your intended counterparty, can assume the role."
-                )
-            ),
-            template="B_05.01",
-            field="0050",
-            row_key=f"{principal.account_id}:{principal.role_name}",
-        )
+        _wildcard_finding(principal) if principal.account_id == ANY_ACCOUNT else _unnamed_finding(principal)
         for principal in unnamed_principals
     ]
+
+
+def _unnamed_finding(principal: ExternalPrincipal) -> Finding:
+    return Finding(
+        code="UNIDENTIFIED_EXTERNAL_PRINCIPAL",
+        severity=Severity.WARNING,
+        message=(
+            f"AWS account {principal.account_id} can assume the role {principal.role_name!r} and no "
+            "table names it as a vendor: an external account has standing access and this register "
+            "cannot say whose it is. If AWS Organizations could not be read on the scan that wrote "
+            "this file, an account of your own organisation appears here exactly as a third party "
+            "would — methodology.md says whether that call succeeded."
+        ),
+        fix=(
+            f"Find out who controls AWS account {principal.account_id} and either add it to the "
+            "account-ID mapping or the overlay so it becomes a named provider row, or remove the "
+            "trust relationship if it is stale. dora-roi will not guess a legal name from a bare "
+            "account number — that would turn a hypothesis into a fact, which this tool's "
+            "provenance rule forbids."
+            + (
+                ""
+                if principal.has_external_id
+                else " The trust also has no sts:ExternalId condition, so anyone who controls that "
+                "account, not only your intended counterparty, can assume the role."
+            )
+        ),
+        template="B_05.01",
+        field="0050",
+        row_key=f"{principal.account_id}:{principal.role_name}",
+    )
+
+
+def _wildcard_finding(principal: ExternalPrincipal) -> Finding:
+    """The `Principal: "*"` case: no counterparty was named because none was named.
+
+    Deliberately a claim about the policy's principal and not about who can
+    really assume the role. A `Condition` on the same statement —
+    `aws:PrincipalOrgID` is the usual one — can narrow a `*` principal to
+    something quite specific, and dora-roi reads only `sts:ExternalId` out of
+    `Condition` (a known, deferred gap). Saying "every AWS account can assume
+    this" would therefore be false on a perfectly ordinary policy; saying "the
+    principal names no account, and here is what this tool did and did not
+    look at" is true on all of them.
+    """
+    return Finding(
+        code="WILDCARD_EXTERNAL_PRINCIPAL",
+        severity=Severity.WARNING,
+        message=(
+            f"The role {principal.role_name!r} names `*` as its trusted principal: it is restricted to no "
+            "AWS account, so this register cannot name a counterparty for it — the policy identifies "
+            "none. That is a different finding from a vendor dora-roi failed to identify."
+        ),
+        fix=(
+            f"Read the trust policy of {principal.role_name!r} and name the account(s) meant to assume it "
+            "in the principal itself, then re-run the scan. dora-roi does not evaluate the statement's "
+            "conditions, so it cannot tell you whether one (`aws:PrincipalOrgID`, for instance) already "
+            "narrows this in practice — check that before treating the role as either safe or open"
+            + (
+                ". The statement does carry an `sts:ExternalId` condition, which this tool does read: an "
+                "external ID is a shared string rather than an identity, so it narrows who knows the "
+                "secret, not who the counterparty is."
+                if principal.has_external_id
+                else ". The one condition this tool does read, `sts:ExternalId`, is absent."
+            )
+        ),
+        template="B_05.01",
+        field="0050",
+        row_key=f"*:{principal.role_name}",
+    )
 
 
 def _check_eba_rules(roi: RegisterOfInformation) -> list[Finding]:

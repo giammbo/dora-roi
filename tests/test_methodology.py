@@ -507,18 +507,19 @@ class TestTheHonestySurface:
         assert "Marketplace" in body
 
     def test_eventbridge_never_attempted_for_lack_of_a_known_region_says_so(self) -> None:
-        """No state file and no cluster means no region was ever known, so
-        EventBridge could not run for any swept account — that must be
-        declared, not rendered as a silent 'read, no result'."""
+        """Nothing in the perimeter naming an AWS region means EventBridge
+        could not run for any swept account — that must be declared, not
+        rendered as a silent 'read, no result'."""
         body = to_markdown(
             [],
             _perimeter(
                 swept=[("111122223333", [])],
-                global_refused=["eventbridge: no regions known (no state file or cluster named one)"],
+                global_refused=["eventbridge: no regions known to sweep — no AWS resource in the perimeter named one"],
             ),
             [],
         )
-        assert "no region" in body.lower()
+        assert "Partner event sources: not swept — no AWS region was known to sweep" in body
+        assert "Partner event sources: read, no result" not in body
 
     def test_an_eventbridge_refusal_names_its_region(self) -> None:
         """A regional refusal must not lose the one detail — which region —
@@ -647,6 +648,85 @@ class TestTheHonestySurface:
         assert "Cross-account trust: read, no result" in first
         assert "Cross-account trust: read" in second
         assert "Identity providers: read, no result" in second
+
+    def test_a_wildcard_trust_never_renders_as_an_empty_channel(self) -> None:
+        """C2: a role every AWS account can assume produces no provider row,
+        so this line read "read, no result" — the sentence printed for an
+        account nobody outside can get into. The two must not look alike."""
+        body = to_markdown(
+            [],
+            _perimeter(
+                swept=[("111122223333", [])],
+                evidence=[["external_principal", "wildcard_trust_principal"]],
+                unnamed=[("*", "PublicRole", False)],
+            ),
+            [],
+        )
+        assert "Cross-account trust: read, no result" not in body
+        assert "wildcard principal" in body
+
+    def test_an_account_with_nothing_in_it_still_says_read_no_result(self) -> None:
+        """The negative half of the test above: the empty case is a real
+        state and must keep its own sentence, not inherit the wildcard's."""
+        body = to_markdown([], _perimeter(swept=[("111122223333", [])], evidence=[[]]), [])
+        assert "Cross-account trust: read, no result" in body
+        assert "wildcard principal" not in body
+
+    def test_an_unnamed_principal_is_evidence_that_the_trust_channel_found_something(self) -> None:
+        """A declared unknown is this channel's own finding (the collector's
+        docstring says so), so the account it came from was not empty."""
+        body = to_markdown(
+            [],
+            _perimeter(
+                swept=[("111122223333", [])],
+                evidence=[["external_principal"]],
+                unnamed=[("999988887777", "MysteryRole", False)],
+            ),
+            [],
+        )
+        assert "Cross-account trust: read" in body
+        assert "Cross-account trust: read, no result" not in body
+        assert "wildcard principal" not in body
+
+    def test_the_wildcard_survives_an_unattributed_refusal(self) -> None:
+        """`_withhold_if_uncertain` replaces a clean line with "unconfirmed"
+        when the account also carries a refusal this note cannot place. The
+        wildcard line is not a clean line — it reports a finding — and
+        withdrawing it would delete the worst thing this note has to say."""
+        body = to_markdown(
+            [],
+            _perimeter(
+                swept=[("111122223333", ["111122223333 config-rules: config:DescribeConfigRules denied"])],
+                evidence=[["wildcard_trust_principal"]],
+                unnamed=[("*", "PublicRole", False)],
+            ),
+            [],
+        )
+        assert "wildcard principal" in body
+        assert "Cross-account trust: unconfirmed" not in body
+        # The other two channels have no such finding and are still withdrawn.
+        assert "Identity providers: unconfirmed" in body
+
+    def test_the_wildcard_principal_gets_its_own_entry_not_an_account_shaped_one(self) -> None:
+        body = to_markdown([], _perimeter(swept=[("1", [])], unnamed=[("*", "PublicRole", False)]), [])
+        section = body.split("## External principals we could not name", 1)[1]
+        assert "Role `PublicRole` names the **wildcard principal" in section
+        assert "Account `*` could not name a vendor" not in section
+
+    def test_a_named_unknown_account_keeps_the_ordinary_sentence(self) -> None:
+        body = to_markdown([], _perimeter(swept=[("1", [])], unnamed=[("999988887777", "MysteryRole", True)]), [])
+        section = body.split("## External principals we could not name", 1)[1]
+        assert "Account `999988887777` could not name a vendor" in section
+        assert "wildcard principal" not in section.split("- Account")[1]
+
+    def test_the_wildcard_sentinel_agrees_with_the_collector(self) -> None:
+        """This module spells the sentinel out rather than importing it, on
+        the same reasoning as the refusal markers — so the two copies have to
+        be checked against each other somewhere."""
+        from dora_roi.collectors.clickops import ANY_ACCOUNT
+        from dora_roi.report.methodology import _ANY_ACCOUNT
+
+        assert _ANY_ACCOUNT == ANY_ACCOUNT
 
     def test_an_unattributed_refusal_is_shown_not_dropped(self) -> None:
         """I1/R1: a refusal in a shape this note does not recognise — a fifth

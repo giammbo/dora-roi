@@ -9,7 +9,8 @@ so a real client can never be put in the state these tests need.
 
 from __future__ import annotations
 
-from dora_roi.collectors.clickops import collect_partner_event_sources
+from dora_roi.collectors.clickops import aws_regions, collect_partner_event_sources
+from dora_roi.collectors.tfstate import DiscoveredProvider
 
 
 class _Bus:
@@ -151,3 +152,49 @@ class TestPagination:
         )
 
         assert [p.name for p in found] == ["datadog", "segment"]
+
+
+class TestWhichRegionsGetSwept:
+    """C3: the sweep used to take every region string in the discovered
+    providers, and `tfstate._region_of` reads a `region` attribute off any
+    resource of any provider. A DigitalOcean `nyc3` became
+    `events.nyc3.amazonaws.com`, and the connection failure was reported as
+    an AWS refusal that also masked the real region's clean read."""
+
+    def _provider(self, name: str, regions: set[str], registry: str = "registry.terraform.io"):
+        return DiscoveredProvider(
+            name=name, namespace="hashicorp", registry=registry, resource_count=1, regions=regions
+        )
+
+    def test_an_aws_providers_regions_are_swept(self) -> None:
+        assert aws_regions([self._provider("aws", {"eu-west-1", "eu-south-1"})]) == frozenset(
+            {"eu-west-1", "eu-south-1"}
+        )
+
+    def test_another_clouds_regions_are_not(self) -> None:
+        providers = [
+            self._provider("aws", {"eu-west-1"}),
+            self._provider("digitalocean", {"nyc3"}),
+            self._provider("scaleway", {"fr-par"}),
+            self._provider("google", {"europe-west1"}),
+            self._provider("linode", {"us-east"}),
+        ]
+        assert aws_regions(providers) == frozenset({"eu-west-1"})
+
+    def test_a_mirrored_aws_provider_still_counts(self) -> None:
+        """Matched on the provider name, so a private registry mirror is
+        still the AWS provider."""
+        provider = self._provider("aws", {"eu-central-1"}, registry="terraform.example.com")
+        assert aws_regions([provider]) == frozenset({"eu-central-1"})
+
+    def test_the_ecr_region_kubernetes_finds_still_counts(self) -> None:
+        """`collectors.k8s` records an ECR image's region on a provider named
+        `aws` whose registry is `k8s` — a real AWS region, from outside
+        Terraform entirely."""
+        provider = DiscoveredProvider(name="aws", namespace="", registry="k8s", resource_count=1, regions={"us-east-1"})
+        assert aws_regions([provider]) == frozenset({"us-east-1"})
+
+    def test_an_estate_with_no_aws_resources_yields_nothing_to_sweep(self) -> None:
+        """Not an empty answer by accident: the caller declares this case as
+        'no AWS region was known', which is only correct if it is empty."""
+        assert aws_regions([self._provider("digitalocean", {"nyc3"})]) == frozenset()
