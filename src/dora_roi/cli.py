@@ -74,7 +74,7 @@ from dora_roi.models.templates import (
 )
 from dora_roi.overlay.vendors import OverlayError, apply_overlay, load_overlay, overlay_template
 from dora_roi.report.gap import build_gap_report, summarize, to_json, to_markdown
-from dora_roi.report.methodology import refusal_kind
+from dora_roi.report.methodology import refusal_kind, refused_channels
 from dora_roi.report.methodology import to_markdown as methodology_markdown
 
 EXIT_OK = 0
@@ -87,9 +87,10 @@ DISCLAIMER = (
     "it reaches a filing."
 )
 PERIMETER_WARNING = (
-    "The channels and accounts named above are the whole of this run's scope; nothing outside them was "
-    "attempted. Being in scope is not the same as having been read cleanly — a refusal inside that scope "
-    "is reported above, by name, never folded silently into a clean read. A vendor that leaves no trace "
+    "The channels named above are the whole of this run's scope; nothing outside them was "
+    "attempted. Being in scope is not the same as having been read cleanly — every entry those channels "
+    "recorded (refused, unparseable, unreached, unattempted or unavailable) is printed above under one of "
+    "those headings, in full and by name, never folded silently into a clean read. A vendor that leaves no trace "
     "anywhere in scope — a SaaS bought on a card, a contract with no infrastructure footprint at all — "
     "is exactly as invisible to this tool as it always was: discovering more here changes how much of "
     "the visible estate this tool can read, not the size of what it cannot. This register does not "
@@ -559,16 +560,22 @@ class _Sources:
         all. Both belong on the terminal, not only in methodology.md, because
         this line is the one every user sees on every run.
 
-        Counts only refusals `refusal_kind` calls `"denied"` — a review
-        found the previous count included any non-empty refusal list, so a
-        trust-policy parse failure alone was enough to print "1 with at
-        least one channel refused" here while `_print_refusals` (below, same
-        run) explains, correctly, that the same line is not a refusal at all
-        (N2).
+        The refused count comes from `methodology.refused_channels`, the same
+        function whose verdict methodology.md's own per-channel lines render.
+        Counting `refusal_kind(r) == "denied"` lines instead — which is what
+        this did — answers a different question and gave a different answer:
+        one denied `iam:ListSAMLProviders` is such a line, but methodology.md
+        renders that account "read, but could not fully enumerate this
+        account's identity providers", so a single IAM denial printed "1 with
+        at least one channel refused" here against a document, written by the
+        same run, saying the channel had been read (F1).
+
+        An account whose refusals cost it part of a channel rather than the
+        whole of it, or that carries a refusal this note cannot attribute,
+        earns no caveat on this line — the refusal itself still reaches the
+        terminal in full, one paragraph below, through `_print_refusals`.
         """
-        refused_count = sum(
-            1 for _, refusals in self.swept_accounts if any(refusal_kind(r) == "denied" for r in refusals)
-        )
+        refused_count = sum(1 for account_id, refusals in self.swept_accounts if refused_channels(account_id, refusals))
         base = f"AWS click-ops discovery: swept {len(self.swept_accounts)} account(s)"
         caveats = []
         if refused_count:
@@ -1245,14 +1252,29 @@ def _print_summary(discovered: list[DiscoveredProvider], summary: Any, output: P
 
 
 #: Console label and one-line explanation for each `refusal_kind()` bucket,
-#: in the order printed. Four buckets, never one: a review found the console
+#: in the order printed. Five buckets, never one: a review found the console
 #: printing everything under a single "Refused" heading called a trust-policy
 #: parse failure and an unreached account "refused" — both AWS said nothing
 #: to, and the very `methodology.md` this same run writes says so in as many
 #: words (R2). Labelling them apart here is what keeps the two surfaces from
 #: contradicting each other on the one claim this whole task exists to keep.
+#:
+#: Each label names its bucket; the note beside it says what the bucket does
+#: and does not distinguish. That division is deliberate — a label is a name
+#: this document assigns, a note is a claim about the world, and only the
+#: second has to survive the code path that fills the bucket.
 _REFUSAL_HEADINGS: dict[str, tuple[str, str]] = {
-    "denied": ("Refused", "AWS said no to a specific action"),
+    # Not "AWS said no to a specific action": every producer of this shape is
+    # an `except Exception`, so a dead credential and an unreachable endpoint
+    # reach it exactly as an `AccessDenied` does, and three of the five write
+    # the word "denied" into the message before looking at the exception at
+    # all (a review finding, F2). `refusal_kind`'s own docstring enumerates
+    # the five call sites.
+    "denied": (
+        "Refused",
+        "one per-account channel call came back an error; denials, unusable credentials and "
+        "unreachable endpoints are not told apart here — read the exception type in each line",
+    ),
     "parse_failure": ("Could not parse", "dora-roi's own failure, not an AWS denial"),
     "not_reached": ("Named but never reached", "no session could be established"),
     "not_attempted": ("Never attempted", "no account or region was ever known to try"),

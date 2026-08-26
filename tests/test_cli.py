@@ -1218,12 +1218,63 @@ class TestConsolePerimeterSurface:
         line every user sees on every run must say so, not only
         methodology.md."""
         sources = self._sweep_sources(
-            swept_accounts=[("111122223333", ["111122223333 iam-idp: iam:ListSAMLProviders denied (AccessDenied)"])]
+            swept_accounts=[
+                (
+                    "111122223333",
+                    [
+                        "111122223333 iam-idp: iam:ListSAMLProviders denied (AccessDenied)",
+                        "111122223333 iam-idp: iam:ListOpenIDConnectProviders denied (AccessDenied)",
+                    ],
+                )
+            ]
         )
         lines = sources.describe()
         click_ops_line = next(line for line in lines if line.startswith("AWS click-ops discovery"))
         assert "1 with at least one channel refused" in click_ops_line
         assert "methodology.md" in click_ops_line
+
+    def test_describe_does_not_call_one_denied_list_call_a_refused_channel(self) -> None:
+        """F1: this line counted refusal *lines* of kind `"denied"`, while
+        methodology.md decides per channel. One denied `iam:ListSAMLProviders`
+        satisfied the first and not the second, so the terminal printed "1
+        with at least one channel refused" while the same run's
+        methodology.md said "read, but could not fully enumerate this
+        account's identity providers" — explicitly not a channel refusal
+        (R5). Both surfaces now read the same verdict."""
+        from dora_roi.report.methodology import to_markdown as methodology_markdown
+
+        swept = [("111122223333", ["111122223333 iam-idp: iam:ListSAMLProviders denied (AccessDenied)"])]
+        sources = self._sweep_sources(swept_accounts=swept)
+        click_ops_line = next(line for line in sources.describe() if line.startswith("AWS click-ops discovery"))
+        assert click_ops_line == "AWS click-ops discovery: swept 1 account(s)"
+
+        body = methodology_markdown(
+            [],
+            {
+                "state_files": [],
+                "aws": True,
+                "aws_sweep_configured": True,
+                "swept_accounts": swept,
+                "swept_evidence": [["oidc_provider"]],
+                "unreachable_accounts": [],
+                "unnamed_principals": [],
+                "clickops_refused": [swept[0][1][0]],
+            },
+            [],
+        )
+        # The two surfaces, same run, same input: neither says refused.
+        assert "Identity providers: refused" not in body
+        assert "Identity providers: read, but could not fully enumerate" in body
+
+    def test_describe_flags_an_account_whose_trust_channel_was_refused(self) -> None:
+        """The other direction of F1: a genuine whole-channel denial must
+        still earn the caveat, so the fix cannot have simply stopped
+        counting."""
+        sources = self._sweep_sources(
+            swept_accounts=[("111122223333", ["111122223333 trust: iam:ListRoles denied (AccessDenied)"])]
+        )
+        click_ops_line = next(line for line in sources.describe() if line.startswith("AWS click-ops discovery"))
+        assert "1 with at least one channel refused" in click_ops_line
 
     def test_describe_does_not_call_a_parse_failure_refused(self) -> None:
         """N2: a trust-policy parse failure is dora-roi's own failure, not
@@ -1274,7 +1325,11 @@ class TestConsolePerimeterSurface:
 
         _print_perimeter(sources, gleif=False)
         output = capsys.readouterr().out
-        assert "Refused" not in output
+        # Anchored to the heading shape, plus `describe()`'s own lowercase
+        # caveat: the bare word now appears in `PERIMETER_WARNING`, which
+        # names every bucket including this one (N2, one constant over).
+        assert "Refused (" not in output
+        assert "channel refused" not in output.lower()
 
     def test_print_perimeter_does_not_call_a_parse_failure_a_refusal(self, capsys: pytest.CaptureFixture) -> None:
         """R2: a trust-policy parse failure is dora-roi's own failure, not
@@ -1291,11 +1346,14 @@ class TestConsolePerimeterSurface:
         output = capsys.readouterr().out
         assert "Could not parse (1)" in output
         assert "not an AWS denial" in output
-        # N2: case-sensitive "Refused" missed the lowercase "refused" that
-        # `describe()`'s own click-ops caveat used to print for this exact
-        # scenario (counting any non-empty refusal slice, parse failures
-        # included) — this check would have passed against that bug.
-        assert "refused" not in output.lower()
+        # Anchored to the two rendered shapes that would carry the claim
+        # rather than to the bare word: `PERIMETER_WARNING` now names every
+        # bucket, "refused" among them, so a whole-output word search is
+        # either vacuous or wrong. Both shapes still matter — N2's own lesson
+        # was that a case-sensitive "Refused" missed the lowercase caveat
+        # `describe()` printed for exactly this scenario.
+        assert "Refused (" not in output
+        assert "channel refused" not in output.lower()
 
     def test_print_perimeter_does_not_call_an_unreached_account_a_refusal(self, capsys: pytest.CaptureFixture) -> None:
         """R2: an account whose session never came up was never read at all —
@@ -1310,7 +1368,9 @@ class TestConsolePerimeterSurface:
         _print_perimeter(sources, gleif=False)
         output = capsys.readouterr().out
         assert "Named but never reached (1)" in output
-        assert "refused" not in output.lower()
+        # Anchored, for the same reason as the sibling test above.
+        assert "Refused (" not in output
+        assert "channel refused" not in output.lower()
 
     def test_print_perimeter_does_not_call_a_cost_explorer_failure_a_refusal(
         self, capsys: pytest.CaptureFixture
@@ -1328,7 +1388,11 @@ class TestConsolePerimeterSurface:
         output = capsys.readouterr().out
         assert "Unavailable (1)" in output
         assert "cost explorer: NoCredentialsError" in output
-        assert "Refused" not in output
+        # Anchored to the heading shape, plus `describe()`'s own lowercase
+        # caveat: the bare word now appears in `PERIMETER_WARNING`, which
+        # names every bucket including this one (N2, one constant over).
+        assert "Refused (" not in output
+        assert "channel refused" not in output.lower()
 
     def test_print_perimeter_does_not_call_a_marketplace_failure_a_refusal(self, capsys: pytest.CaptureFixture) -> None:
         """N1's other reachable shape: Marketplace's broadest catch takes
@@ -1340,7 +1404,32 @@ class TestConsolePerimeterSurface:
         _print_perimeter(sources, gleif=False)
         output = capsys.readouterr().out
         assert "Unavailable (1)" in output
-        assert "Refused" not in output
+        # Anchored to the heading shape, plus `describe()`'s own lowercase
+        # caveat: the bare word now appears in `PERIMETER_WARNING`, which
+        # names every bucket including this one (N2, one constant over).
+        assert "Refused (" not in output
+        assert "channel refused" not in output.lower()
+
+    def test_the_refused_heading_does_not_claim_aws_said_no(self, capsys: pytest.CaptureFixture) -> None:
+        """F2: the `"denied"` bucket's five producers are all
+        `except Exception` (`clickops.py`'s `_listed` and `_denial`, and the
+        `ListRoles` and `ListEventSources` catches). A profile-only sweep
+        account is never validated until its first call, so a
+        `NoCredentialsError` prints here — under a heading that used to say
+        "AWS said no to a specific action"."""
+        from dora_roi.cli import _print_perimeter
+
+        line = "111122223333 iam-idp: iam:ListSAMLProviders denied (NoCredentialsError: Unable to locate credentials)"
+        sources = self._sweep_sources(swept_accounts=[])
+        sources.clickops_refused.append(line)
+        _print_perimeter(sources, gleif=False)
+        output = capsys.readouterr().out
+        # It really does land in this bucket — that is what makes the heading
+        # a claim about the world rather than a harmless label.
+        assert "Refused (1)" in output
+        assert "NoCredentialsError" in output
+        assert "AWS said no to a specific action" not in output
+        assert "are not told apart here" in output
 
     def test_print_perimeter_never_truncates_the_refusal_list(self, capsys: pytest.CaptureFixture) -> None:
         """R3: `PERIMETER_WARNING` claims a refusal in scope "is reported
@@ -1396,6 +1485,60 @@ class TestConsolePerimeterSurface:
         monkeypatch.setattr(cli_module, "collect_marketplace", lambda **k: ([], []))
 
         def fake_sweep(*, account_id: str, refused: list[str], **_: object):
+            # Both list calls, not one: only both failing costs the whole
+            # channel (R5), and this test is about a genuinely refused
+            # channel reaching the terminal.
+            refused.append(f"{account_id} iam-idp: iam:ListSAMLProviders denied (ClientError: AccessDenied)")
+            refused.append(f"{account_id} iam-idp: iam:ListOpenIDConnectProviders denied (ClientError: AccessDenied)")
+            return [], []
+
+        monkeypatch.setattr(cli_module, "collect_clickops", fake_sweep)
+
+        sources_file = tmp_path / "sources.yaml"
+        sources_file.write_text("states: []\naws:\n  accounts:\n    - id: '444455556666'\n      profile: member\n")
+
+        result = runner.invoke(app, ["scan", "-o", str(tmp_path), "--aws", "--sources", str(sources_file)])
+        assert result.exit_code == 0, result.output
+        # Three refusals reach stdout, in two different buckets: the two
+        # per-account denials this test injects, and the pre-existing global
+        # "no regions known" one — no state file is given here, so EventBridge
+        # never learns a region either. Never-attempted must not be relabelled
+        # "Refused" (R2) — both belong on the console regardless, not only in
+        # methodology.md.
+        assert "Refused (2)" in result.output
+        assert "Never attempted (1)" in result.output
+        assert "444455556666 iam-idp: iam:ListSAMLProviders denied" in result.output
+        assert "with at least one channel refused" in result.output
+
+    def test_a_partial_denial_reads_the_same_on_both_surfaces_of_one_real_scan(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """F1, end to end: one denied `iam:ListSAMLProviders` used to print
+        "1 with at least one channel refused" on the terminal while the
+        methodology.md written by the same invocation said the channel had
+        been read. Both surfaces, one run, one verdict."""
+        from datetime import date
+
+        from dora_roi.collectors.aws import DiscoveredAccount, ExpenseReport, OrganizationInventory
+
+        org = OrganizationInventory(
+            organization_id="o-x",
+            master_account_id="111122223333",
+            accounts=[
+                DiscoveredAccount(
+                    account_id="111122223333", name="root", email=None, status="ACTIVE", ou_path=("Root",)
+                )
+            ],
+        )
+        monkeypatch.setattr(cli_module, "collect_organization", lambda **k: org)
+        monkeypatch.setattr(
+            cli_module,
+            "collect_annual_expense",
+            lambda **k: ExpenseReport(currency=None, by_service={}, period=(date(2025, 8, 1), date(2026, 8, 1))),
+        )
+        monkeypatch.setattr(cli_module, "collect_marketplace", lambda **k: ([], []))
+
+        def fake_sweep(*, account_id: str, refused: list[str], **_: object):
             refused.append(f"{account_id} iam-idp: iam:ListSAMLProviders denied (ClientError: AccessDenied)")
             return [], []
 
@@ -1406,16 +1549,17 @@ class TestConsolePerimeterSurface:
 
         result = runner.invoke(app, ["scan", "-o", str(tmp_path), "--aws", "--sources", str(sources_file)])
         assert result.exit_code == 0, result.output
-        # Two refusals reach stdout, in two different buckets: the per-account
-        # denial this test injects (a genuine AWS refusal), and the
-        # pre-existing global "no regions known" one — no state file is given
-        # here, so EventBridge never learns a region either. Never-attempted
-        # must not be relabelled "Refused" (R2) — both belong on the console
-        # regardless, not only in methodology.md.
-        assert "Refused (1)" in result.output
-        assert "Never attempted (1)" in result.output
+
+        # Terminal: no refused-channel caveat…
+        assert "channel refused" not in result.output.lower()
+        assert "AWS click-ops discovery: swept 1 account(s)" in result.output
+        # …but the denial itself is still printed in full, not hidden.
         assert "444455556666 iam-idp: iam:ListSAMLProviders denied" in result.output
-        assert "with at least one channel refused" in result.output
+
+        # methodology.md, same run: the same verdict, in its own words.
+        body = (tmp_path / "methodology.md").read_text(encoding="utf-8")
+        assert "Identity providers: refused" not in body
+        assert "Identity providers: read, but could not fully enumerate" in body
 
 
 class TestKubernetesWiring:

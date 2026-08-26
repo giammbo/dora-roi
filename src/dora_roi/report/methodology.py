@@ -26,10 +26,13 @@ from dora_roi.collectors.tfstate import NON_VENDOR_PROVIDERS
 from dora_roi.models.enums import FieldStatus
 from dora_roi.report.gap import GapEntry, summarize
 
-__all__ = ["refusal_kind", "to_markdown"]
+__all__ = ["refusal_kind", "refused_channels", "to_markdown"]
 
 _METHOD = """\
-Vendors were identified from three kinds of evidence, and nothing else:
+Every vendor row in this register came from one of the five kinds of evidence
+below; no other channel this run has can create one. That is a statement about
+how a row gets made, not about coverage — whether these five saw the estate is
+the separate question *What was read* answers, as far as it can:
 
 1. **Terraform providers.** Each `provider[...]` block in a state file is a
    vendor relationship, weighted by how many resources run through it.
@@ -41,11 +44,22 @@ Vendors were identified from three kinds of evidence, and nothing else:
    a packaged table on the registrable domain only, never as a substring.
 3. **Kubernetes**, where a cluster was scanned: image registries, `ExternalName`
    services and ingress hosts.
+4. **AWS Marketplace billing**, where `--aws` was given: the seller of record on
+   the Marketplace charges billed to the calling account. Alone among these, it
+   names a legal entity AWS itself invoices rather than a hostname.
+5. **AWS click-ops discovery**, in each account listed under *Accounts swept*:
+   federated identity providers, trust policies naming an outside AWS account,
+   and EventBridge partner event sources. Each of the three yields a hostname or
+   an account number — who signs your people in, or who holds standing access —
+   never the entity a contract was signed with.
 
 Legal identity was resolved against GLEIF where enabled. A result counts as
 confirmed only when the legal name GLEIF returned matches the name that was
-searched; anything else is recorded as a candidate and marked inferred, because
-GLEIF's name filter is a search and not an equality test.
+searched — GLEIF's name filter is a search and not an equality test — **and**
+only when that searched name was itself asserted by a person in the overlay: an
+exact match on a name this tool guessed confirms the LEI of the entity this tool
+guessed, and nothing about who the counterparty is. Every other result is
+recorded as a candidate and marked inferred.
 
 Field codes, names and closed lists were reconciled against the official EBA
 annotated table layout and sample report package, which are vendored in this
@@ -112,15 +126,25 @@ def refusal_kind(line: str) -> str:
       catches whatever else a client or a connection can do. Calling either
       shape a denial would claim more than the exception that produced it
       distinguishes.
-    - ``"denied"`` — everything else: a per-account identity-providers,
-      trust or EventBridge call this account's own session made, where AWS
-      returned an error for that one call.
+    - ``"denied"`` — everything else: one per-account identity-providers,
+      trust or EventBridge call, made by that account's own session, that
+      came back an error. Not necessarily a denial. All five producers of
+      this shape (`clickops.py`'s `_listed` and `_denial`, and the
+      `ListRoles` and `ListEventSources` catches) are ``except Exception``,
+      so a credential that was never usable, an unreachable endpoint and an
+      ``AccessDenied`` all land here alike — and three of the five write the
+      word "denied" into the message before the exception is examined. The
+      exception type each message carries in parentheses is the only thing
+      that tells those apart; this bucket does not.
 
     Works on a raw, whole-run `clickops_refused` line (still carrying its
     `"<account> <channel>: "` prefix) and on the same line already stripped
-    of that prefix (as `_classify_refusals` produces) alike: every check
-    here is a substring match on text that never appears inside the other
-    two, never a match anchored to where the account happened to end.
+    of that prefix (as `_classify_refusals` produces) alike. Two checks are
+    substring matches, on text that appears in no other shape. The other
+    four are anchored to the start of the line and match only whole-run
+    refusals, which never carry an account prefix in the first place. No
+    check is anchored to where the account happened to end, which is what
+    broke once already (C1).
     """
     if _NO_CREDS_TEXT in line:
         return "not_reached"
@@ -187,6 +211,51 @@ def _found(evidence: Sequence[str], keys: Sequence[str]) -> bool:
     return any(key in evidence for key in keys)
 
 
+def _idp_whole(refusals: Sequence[str]) -> list[str]:
+    """The identity-providers refusals that cost the channel outright.
+
+    ``collect_identity_providers`` makes two independent ``list_*`` calls,
+    neither gated on the other, plus a ``get_*`` per item either returns.
+    Only both list calls failing costs the whole channel; anything narrower
+    costs part of it and is reported as such (findings I2 and R5).
+    """
+    list_denials = [r for r in refusals if any(action in r for action in _IDP_LIST_ACTIONS)]
+    denied_list_actions = {action for action in _IDP_LIST_ACTIONS if any(action in r for r in list_denials)}
+    return list_denials if denied_list_actions == set(_IDP_LIST_ACTIONS) else []
+
+
+def _trust_whole(refusals: Sequence[str]) -> list[str]:
+    """The cross-account-trust refusals that cost the channel outright.
+
+    ``iam:ListRoles`` is the channel's only call, so failing it costs
+    everything. A trust policy this tool could not parse costs one role.
+    """
+    return [r for r in refusals if "iam:ListRoles" in r]
+
+
+def refused_channels(account_id: str, refusals: Sequence[str]) -> list[str]:
+    """Which of one account's three per-account channels came back refused —
+    decided by the same test the rendered lines below use, so a count taken
+    here can never contradict a line rendered there.
+
+    The console's click-ops caveat (`cli._click_ops_discovery_line`) counts
+    accounts through this function. It used to count refusal *lines* whose
+    `refusal_kind` was `"denied"`, which answers a different question: one
+    denied `iam:ListSAMLProviders` is such a line, but `_idp_line` renders
+    that account "read, but could not fully enumerate this account's identity
+    providers" — explicitly not a channel refusal (R5). A single IAM denial
+    therefore printed "1 with at least one channel refused" on the terminal
+    while the same run's methodology.md said the channel had been read.
+    """
+    idp, trust, eventbridge, _residual = _classify_refusals(account_id, refusals)
+    refused = (
+        ("Identity providers", bool(_idp_whole(idp))),
+        ("Cross-account trust", bool(_trust_whole(trust))),
+        ("Partner event sources", bool(eventbridge)),
+    )
+    return [name for name, is_refused in refused if is_refused]
+
+
 def _idp_line(refusals: list[str], found: bool) -> str:
     """Identity providers is really two independent list calls (SAML, OIDC)
     plus a `get` per item either one returns. A `get` denial costs one
@@ -198,9 +267,7 @@ def _idp_line(refusals: list[str], found: bool) -> str:
     refusal would contradict a register that still carries a row this
     channel itself produced.
     """
-    list_denials = [r for r in refusals if any(action in r for action in _IDP_LIST_ACTIONS)]
-    denied_list_actions = {action for action in _IDP_LIST_ACTIONS if any(action in r for r in list_denials)}
-    whole = list_denials if denied_list_actions == set(_IDP_LIST_ACTIONS) else []
+    whole = _idp_whole(refusals)
     partial = [r for r in refusals if r not in whole]
     if whole:
         return f"  - Identity providers: refused — {'; '.join(whole)}"
@@ -219,7 +286,7 @@ def _trust_line(refusals: list[str], found: bool) -> str:
     "AWS said no to a specific action", and labelling a parse failure that
     way would assert something that did not happen (review finding I2).
     """
-    whole = [r for r in refusals if "iam:ListRoles" in r]
+    whole = _trust_whole(refusals)
     unparseable = [r for r in refusals if r not in whole]
     if whole:
         return f"  - Cross-account trust: refused — {'; '.join(whole)}"
@@ -272,9 +339,11 @@ def _withhold_if_uncertain(line: str, has_residual: bool) -> str:
 
 
 def _accounts_swept_section(perimeter: dict[str, Any]) -> list[str]:
-    """Golden rule 5, applied to the four click-ops channels: never let a
-    reader conclude an account or a channel was read when it was refused, or
-    was read at all when nothing named it to sweep in the first place.
+    """Golden rule 5, applied to the three per-account click-ops channels
+    (Marketplace, the fourth, answers once for the payer and is reported
+    under *What was read*): never let a reader conclude an account or a
+    channel was read when the call came back an error, or was read at all
+    when nothing named it to sweep in the first place.
     """
     swept_accounts: list[tuple[str, list[str]]] = [
         (account_id, list(refusals)) for account_id, refusals in (perimeter.get("swept_accounts") or [])
@@ -303,15 +372,22 @@ def _accounts_swept_section(perimeter: dict[str, Any]) -> list[str]:
         "trust relationships, and EventBridge partner event sources — answers a "
         "different question for each account than a single yes/no. The distinction this "
         "note exists to keep: **read, no result** (the call succeeded and found nothing) "
-        "and **refused** (AWS said no to a specific action, named below) arrive as the "
-        "same empty list in memory and are opposite claims about the world. A clean "
-        "**read** (the call succeeded and found something) is a third, positive claim. "
+        "and **refused** (the call came back an error instead of an answer, quoted "
+        "below) arrive as the same empty list in memory and are opposite claims about "
+        "the world. A clean **read** (the call succeeded and found something) is a "
+        "third, positive claim. *Refused* is named for what dora-roi saw, not for what "
+        "AWS did: each of these calls is wrapped in a catch that takes every exception "
+        "alike, so an `AccessDenied`, a credential that was never usable and an endpoint "
+        "that could not be reached all arrive on this line together. Read the exception "
+        "type quoted in the message to tell them apart — not the word *denied*, which "
+        "the collector writes before it looks at the exception. "
         "Other lines below say more precisely what happened rather than collapsing into "
-        "one of those three: a single provider's document dora-roi could not retrieve "
-        "costs that one document, not the whole channel; a single role's trust policy "
-        "dora-roi could not parse is this tool's own failure, not an AWS denial, and is "
-        "named as such; a channel with no known region says so instead of reading as a "
-        "clean read or a refusal; and a refusal this note could not attribute to any of "
+        "one of those three: an identity-providers call that failed for one provider "
+        "type, or for one already-listed provider's document, costs that part and not "
+        "the whole channel; a single role's trust policy dora-roi could not parse is "
+        "this tool's own failure, not an AWS denial, and is named as such; a channel "
+        "with no known region says so instead of reading as a clean read or a refusal; "
+        "and a refusal this note could not attribute to any of "
         "the three channels marks each of this account's otherwise-clean lines "
         "**unconfirmed** instead of read or empty, because that unattributed refusal "
         "might belong to exactly that channel.",
@@ -350,9 +426,14 @@ def _accounts_swept_section(perimeter: dict[str, Any]) -> list[str]:
             # refused, and must not be described as one.
             out += [f"No account could be resolved to sweep: {aws_sweep_refusal}.", ""]
         elif unreachable_accounts:
+            # Not "refused": no call was ever made to be refused. Every
+            # account this run resolved to sweep failed at session
+            # construction, which this document keeps apart from a refusal
+            # everywhere else it renders one (R2) and must keep apart here.
             out += [
-                "Every account named in the sweep configuration was refused before a usable "
-                "session existed; none of the three channels above ran anywhere.",
+                "Every account this run resolved to sweep failed before a usable session "
+                "existed, so no call was made in any of them and none of the three channels "
+                "above ran anywhere. Each is named below with the failure that stopped it.",
                 "",
             ]
         else:
@@ -387,10 +468,14 @@ def _accounts_swept_section(perimeter: dict[str, Any]) -> list[str]:
         out += [
             "### Refusals we could not attribute to a channel",
             "",
-            "Every other refusal above was recognised as belonging to one of the three "
-            "channels. These were not — a reworded message, or a fifth channel this note "
-            "does not yet know about — and are shown as-is rather than left to default their "
-            "channel to a false *read, no result*:",
+            "Each swept account's own refusals were matched against the three channel "
+            "markers this note knows. The ones below matched none of them — a reworded "
+            "message, or a fifth channel this note does not yet know about — and are shown "
+            "as-is rather than left to default their channel to a false *read, no result*. "
+            "This is a statement about one account's own refusals matched against those "
+            "markers, and about nothing wider: the whole-run refusals — Cost Explorer, "
+            "Marketplace, a sweep that resolved to no account, a channel with no known "
+            "region — belong to no single account and are not classified here at all.",
             "",
         ]
         out += [f"- **{account}**: {message}" for account, message in residual_by_account]
@@ -510,8 +595,16 @@ def to_markdown(
         "## What was deliberately not read",
         "",
     ]
+    # `excluded` is filled by `sources.fetch_sources` alone (cli.py) — a
+    # remote state this run chose not to fetch. Nothing a channel was refused
+    # on, or could not reach, ever reaches it. So the empty case says only
+    # that nothing was skipped on purpose; saying "every source named above
+    # was read in full" put a claim about outcomes on a list that records
+    # intentions, and a run with three IAM denials printed it verbatim.
     out += [f"- {note}" for note in excluded] or [
-        "- Nothing was in reach and excluded: every source named above was read in full."
+        "- Nothing in reach was skipped on purpose. This section records only what this "
+        "run chose not to read; a source it did try to read and could not is reported "
+        "with the channel it belongs to, not here."
     ]
     out += [
         "",
@@ -536,7 +629,10 @@ def to_markdown(
         f"a billing API, or a human assertion in the overlay. |",
         f"| Inferred | {summary.inferred} | Derived from a mapping or from infrastructure. "
         f"**Reviewed by a person before filing, or it is a guess.** |",
-        f"| Missing | {summary.missing} | No source could produce a value. "
+        # Not "no source could produce a value": a field holding a value that
+        # carries no recorded basis is counted here too (the warning below
+        # counts those separately), and that is the opposite situation.
+        f"| Missing | {summary.missing} | Nothing recorded a basis for a value here. "
         f"{summary.blocking_missing} of these are mandatory and block a filing. |",
         "",
     ]
@@ -578,10 +674,11 @@ def to_markdown(
         "",
         "## Evidence",
         "",
-        "- `inventory.json` — every provider found, with the file each was found in.",
+        "- `inventory.json` — every provider found, with where each was found: a state "
+        "file, a cluster, or the AWS channel and account that named it.",
         "- `gap-report.md` / `.json` — every field, its basis, and whether it blocks a filing.",
         "- `roi_prefill.json` — the register itself, keyed by official field code, each value "
-        "paired with where it came from.",
+        "paired with the basis recorded for it, where one was recorded.",
         "",
         f"Authoritative sources relied on: {', '.join(f'`{s}`' for s in filled_sources) or 'none'}.",
         "",

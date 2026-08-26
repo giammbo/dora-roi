@@ -113,7 +113,41 @@ class TestWhatWasDeliberatelyNotRead:
         assert "workspace 'staging'" in body
 
     def test_nothing_excluded_says_so_explicitly(self) -> None:
-        assert "Nothing was in reach and excluded" in note()
+        assert "Nothing in reach was skipped on purpose" in note()
+
+    def test_nothing_excluded_does_not_claim_every_source_was_read(self) -> None:
+        """F4: `excluded` is filled by `sources.fetch_sources` alone — a
+        remote state this run chose not to fetch. Nothing a channel was
+        refused on ever reaches it, so "every source named above was read in
+        full" was a claim about outcomes printed off a list of intentions,
+        and a run whose every AWS channel was denied printed it verbatim,
+        directly above the section naming those denials."""
+        body = flat(
+            to_markdown(
+                [],
+                _perimeter(
+                    swept=[
+                        (
+                            "111122223333",
+                            [
+                                "111122223333 iam-idp: iam:ListSAMLProviders denied (AccessDenied)",
+                                "111122223333 iam-idp: iam:ListOpenIDConnectProviders denied (AccessDenied)",
+                                "111122223333 trust: iam:ListRoles denied (AccessDenied)",
+                            ],
+                        )
+                    ],
+                    global_refused=["cost explorer: NoCredentialsError: Unable to locate credentials"],
+                ),
+                [],
+            )
+        )
+        assert "was read in full" not in body
+        assert "every source named above" not in body
+        # The positive half, so this cannot pass by the section falling
+        # silent: it still says what the empty list means, and the refusals
+        # it used to contradict are still rendered.
+        assert "Nothing in reach was skipped on purpose" in body
+        assert "Identity providers: refused" in body
 
     def test_the_shadow_it_limit_is_stated_either_way(self) -> None:
         assert "does not claim to be complete" in flat(note())
@@ -125,6 +159,31 @@ class TestMethod:
         body = note()
         assert "Terraform providers" in body and "DNS records" in body and "Kubernetes" in body
 
+    def test_it_names_every_kind_of_evidence_that_can_mint_a_vendor_row(self) -> None:
+        """F3: "Vendors were identified from three kinds of evidence, and
+        nothing else" outlived four more being added. Marketplace billing,
+        identity providers, cross-account trust and EventBridge partner
+        sources all mint rows through `cli._fold_in`, and this very document
+        lists them two sections earlier under *What was read*."""
+        body = flat(note())
+        assert "three kinds of evidence, and nothing else" not in body
+        for kind in (
+            "Terraform providers",
+            "DNS records",
+            "Kubernetes",
+            "AWS Marketplace billing",
+            "AWS click-ops discovery",
+        ):
+            assert f"**{kind}" in body, kind
+
+    def test_it_does_not_read_the_row_minting_rule_as_a_coverage_claim(self) -> None:
+        """Golden rule 5: naming every channel that can create a row says
+        nothing about whether those channels saw the estate, and the sentence
+        must not be readable as if it did."""
+        body = flat(note())
+        assert "not about coverage" in body
+        assert "does not claim to be complete" in body
+
     def test_it_names_the_providers_it_excludes_as_non_vendors(self) -> None:
         assert "`random`" in note() and "`archive`" in note()
 
@@ -132,6 +191,17 @@ class TestMethod:
         body = flat(note())
         assert "matches the name that was searched" in body
         assert "search and not an equality test" in body
+
+    def test_it_states_the_overlay_half_of_the_gleif_rule_too(self) -> None:
+        """`_enrich_with_gleif` writes FILLED only when the match is exact
+        **and** the name searched came from the overlay (`cli.py`'s
+        `exact and asserted`). Stating the exact-match half alone described
+        an exact match on a guessed name as confirmed, which the code has
+        never done and — since a Marketplace billing fact can now supply that
+        name too — matters more, not less, than when the sentence was written."""
+        body = flat(note())
+        assert "asserted by a person in the overlay" in body
+        assert "recorded as a candidate and marked inferred" in body
 
     def test_it_says_the_domain_data_was_reconciled_against_the_eba_files(self) -> None:
         assert "EBA annotated table layout" in flat(note())
@@ -418,7 +488,7 @@ class TestTheHonestySurface:
             [],
         )
         assert "no account list to assume it into" in body
-        assert "refused before a usable session existed" not in body
+        assert "failed before a usable session existed" not in body
 
     def test_an_empty_aws_block_is_not_described_as_a_refused_sweep(self) -> None:
         """An `aws:` block with neither `accounts:` nor `assume_role_name:`
@@ -428,7 +498,7 @@ class TestTheHonestySurface:
         either's wording."""
         body = to_markdown([], _perimeter(aws_sweep_configured=True), [])
         assert "did not resolve to a single account" in body
-        assert "refused before a usable session existed" not in body
+        assert "failed before a usable session existed" not in body
         assert "no account list to assume it into" not in body
 
     def test_a_channel_that_actually_found_something_is_not_reported_as_no_result(self) -> None:
@@ -627,6 +697,156 @@ class TestTheHonestySurface:
             [],
         )
         assert "Cross-account trust: refused — iam:ListRoles denied" in body
+
+    def test_refused_is_not_glossed_as_aws_saying_no(self) -> None:
+        """F2: every producer of a per-channel refusal is an
+        `except Exception` — `clickops.py`'s `_listed` and `_denial`, and the
+        `ListRoles` and `ListEventSources` catches. A profile-only sweep
+        account is never validated until its first call, so a
+        `NoCredentialsError` renders here as *refused*, and three of the five
+        producers write the word "denied" into the message before looking at
+        the exception at all. The intro may not gloss that as AWS having said
+        no to a specific action."""
+        body = flat(to_markdown([], _perimeter(swept=[("111122223333", [])]), []))
+        assert "AWS said no to a specific action" not in body
+        # The positive half: the state is still defined, and still defined as
+        # the opposite of an empty result — the distinction this note exists
+        # to keep is not what was hedged.
+        assert "came back an error instead of an answer" in body
+        assert "named for what dora-roi saw, not for what AWS did" in body
+        assert "the same empty list in memory and are opposite claims" in body
+
+    def test_a_credential_failure_renders_refused_which_is_why_the_gloss_is_hedged(self) -> None:
+        """The code path behind F2, rendered: `boto3.Session()` for a
+        profile with no usable credentials constructs fine (nothing is
+        validated until the first call), so both `list_*` calls fail with
+        `NoCredentialsError` and this account renders *refused* — no AWS
+        denial anywhere in it."""
+        body = to_markdown(
+            [],
+            _perimeter(
+                swept=[
+                    (
+                        "111122223333",
+                        [
+                            "111122223333 iam-idp: iam:ListSAMLProviders denied "
+                            "(NoCredentialsError: Unable to locate credentials)",
+                            "111122223333 iam-idp: iam:ListOpenIDConnectProviders denied "
+                            "(NoCredentialsError: Unable to locate credentials)",
+                        ],
+                    )
+                ]
+            ),
+            [],
+        )
+        assert "Identity providers: refused" in body
+        assert "Identity providers: read, no result" not in body
+        # The exception type is the only thing that tells this from a denial,
+        # so it has to survive into the rendered line.
+        assert "NoCredentialsError" in body
+
+    def test_the_residual_heading_does_not_speak_for_the_whole_run(self) -> None:
+        """ "Every other refusal above was recognised as belonging to one of
+        the three channels" covered more than the classifier ever sees: the
+        whole-run refusals (Cost Explorer, Marketplace, an unresolved sweep,
+        a channel with no known region) belong to no account and are never
+        put through `_classify_refusals` at all."""
+        body = flat(
+            to_markdown(
+                [],
+                _perimeter(
+                    swept=[("111122223333", ["111122223333 config-rules: config:DescribeConfigRules denied"])],
+                    global_refused=["cost explorer: NoCredentialsError: Unable to locate credentials"],
+                ),
+                [],
+            )
+        )
+        assert "Every other refusal above was recognised" not in body
+        assert "belong to no single account and are not classified here at all" in body
+        # The positive half: the residual itself is still surfaced verbatim.
+        assert "config:DescribeConfigRules denied" in body
+
+    def test_every_account_unreachable_is_not_described_as_refused(self) -> None:
+        """An account whose session never came up was refused nothing: no
+        call was made. The fallback text called it "refused before a usable
+        session existed" while every other surface in this run — the console
+        buckets, `refusal_kind`, the per-account table — keeps the two
+        apart."""
+        body = flat(
+            to_markdown(
+                [],
+                _perimeter(unreachable=[("555566667777", "no usable credentials (ProfileNotFound: bogus)")]),
+                [],
+            )
+        )
+        assert "refused before a usable session existed" not in body
+        assert "failed before a usable session existed" in body
+        assert "no call was made in any of them" in body
+
+
+class TestRefusedChannels:
+    """F1: `describe()`'s "N with at least one channel refused" counted
+    refusal *lines* of kind `"denied"`, while methodology.md decides per
+    channel whether the account was refused at all. One denied
+    `iam:ListSAMLProviders` satisfied the first and not the second, so the
+    terminal and the document written by the same run contradicted each
+    other. `refused_channels` is the one verdict both now read."""
+
+    def test_a_single_list_denial_does_not_refuse_the_channel(self) -> None:
+        from dora_roi.report.methodology import refused_channels
+
+        line = "111122223333 iam-idp: iam:ListSAMLProviders denied (ClientError: AccessDenied)"
+        assert refused_channels("111122223333", [line]) == []
+
+    def test_both_list_denials_refuse_the_channel(self) -> None:
+        from dora_roi.report.methodology import refused_channels
+
+        lines = [
+            "111122223333 iam-idp: iam:ListSAMLProviders denied (ClientError: AccessDenied)",
+            "111122223333 iam-idp: iam:ListOpenIDConnectProviders denied (ClientError: AccessDenied)",
+        ]
+        assert refused_channels("111122223333", lines) == ["Identity providers"]
+
+    def test_a_per_item_get_denial_does_not_refuse_the_channel(self) -> None:
+        from dora_roi.report.methodology import refused_channels
+
+        line = (
+            "111122223333 iam-idp: iam:GetSAMLProvider on "
+            "arn:aws:iam::111122223333:saml-provider/okta (ClientError: AccessDenied)"
+        )
+        assert refused_channels("111122223333", [line]) == []
+
+    def test_a_parse_failure_does_not_refuse_the_channel(self) -> None:
+        from dora_roi.report.methodology import refused_channels
+
+        line = "111122223333 trust: unreadable trust policy on role 'Legacy'"
+        assert refused_channels("111122223333", [line]) == []
+
+    def test_listroles_and_eventbridge_denials_do_refuse_their_channels(self) -> None:
+        from dora_roi.report.methodology import refused_channels
+
+        lines = [
+            "111122223333 trust: iam:ListRoles denied (ClientError: AccessDenied)",
+            "111122223333/eu-west-1 eventbridge: events:ListEventSources denied (ClientError: AccessDenied)",
+        ]
+        assert refused_channels("111122223333", lines) == ["Cross-account trust", "Partner event sources"]
+
+    def test_an_unattributed_refusal_is_not_counted_as_a_refused_channel(self) -> None:
+        """It renders each line *unconfirmed*, which is a different claim
+        from refused — the count must not borrow the stronger word."""
+        from dora_roi.report.methodology import refused_channels
+
+        assert refused_channels("111122223333", ["111122223333 config-rules: config:DescribeConfigRules denied"]) == []
+
+    def test_an_arn_keyed_account_still_finds_its_eventbridge_refusal(self) -> None:
+        """C1's root cause, guarded on this path too: a role ARN carries a
+        `/` of its own, and EventBridge packs `<account>/<region>` ahead of
+        its marker."""
+        from dora_roi.report.methodology import refused_channels
+
+        account = "arn:aws:iam::123456789012:role/DoraReader"
+        line = f"{account}/eu-west-1 eventbridge: events:ListEventSources denied (AccessDenied)"
+        assert refused_channels(account, [line]) == ["Partner event sources"]
 
 
 class TestRefusalKind:
