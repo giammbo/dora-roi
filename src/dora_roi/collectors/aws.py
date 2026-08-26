@@ -50,8 +50,18 @@ __all__ = [
     "readonly",
 ]
 
-#: The IAM actions this tool ever calls. Ship this list; grant nothing else.
-#: Every one is a read — see :func:`readonly`, which enforces it in code.
+#: Historical, shape-only check: every entry here still looks like a read
+#: (``list_``/``describe_``/``get_``/``search`` verb), which is what
+#: :func:`test_every_documented_action_is_a_read` in ``tests/test_aws.py``
+#: asserts. It is **not** the policy to grant — it predates
+#: :data:`REQUIRED_IAM_ACTIONS` below, is scoped only to this module's own
+#: Organizations/Cost Explorer calls, and itself still names several actions
+#: (``ce:GetTags``, ``tag:GetResources``, ``tag:GetTagKeys``,
+#: ``resource-explorer-2:Search``, ``resource-explorer-2:ListViews``,
+#: ``iam:ListUsers``, ``organizations:ListAccounts``) that Task 10 of the
+#: clickops-aws-discovery run proved nothing in the codebase calls.
+#: :data:`REQUIRED_IAM_ACTIONS` is the one a user should grant; the README's
+#: published policy is checked against that constant, not this one.
 READ_ONLY_ACTIONS: tuple[str, ...] = (
     "organizations:DescribeOrganization",
     "organizations:ListRoots",
