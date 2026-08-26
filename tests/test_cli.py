@@ -1193,6 +1193,88 @@ class TestAwsSweepAccounting:
         assert {p.name for p in sources.swept_evidence[1]} == {"datadog"}
 
 
+class TestUnnamedPrincipalsReachCheckAndExport:
+    """`_perimeter` already writes `sources.unnamed_principals` into
+    `roi_prefill.json`'s `perimeter.unnamed_principals`. This class is the read
+    side: `check` and `export` must actually load that back and pass it into
+    `preflight()`, not just leave it sitting in the file unread."""
+
+    def _org(self):
+        from dora_roi.collectors.aws import DiscoveredAccount, OrganizationInventory
+
+        return OrganizationInventory(
+            organization_id="o-x",
+            master_account_id="111122223333",
+            accounts=[
+                DiscoveredAccount(
+                    account_id="111122223333", name="root", email=None, status="ACTIVE", ou_path=("Root",)
+                )
+            ],
+        )
+
+    def _expense(self):
+        from datetime import date
+
+        from dora_roi.collectors.aws import ExpenseReport
+
+        return ExpenseReport(currency=None, by_service={}, period=(date(2025, 8, 1), date(2026, 8, 1)))
+
+    def _scan(self, output: Path, monkeypatch: pytest.MonkeyPatch, principals: list) -> None:
+        monkeypatch.setattr(cli_module, "collect_organization", lambda **k: self._org())
+        monkeypatch.setattr(cli_module, "collect_annual_expense", lambda **k: self._expense())
+        monkeypatch.setattr(cli_module, "collect_marketplace", lambda **k: ([], []))
+        monkeypatch.setattr(cli_module, "collect_clickops", lambda **k: ([], list(principals)))
+
+        sources_file = output.parent / f"{output.name}-sources.yaml"
+        output.mkdir(parents=True, exist_ok=True)
+        sources_file.write_text("states: []\naws:\n  accounts:\n    - id: '111122223333'\n      profile: member\n")
+
+        result = runner.invoke(app, ["scan", "-o", str(output), "--aws", "--sources", str(sources_file)])
+        assert result.exit_code == 0, result.output
+
+    def test_check_prints_the_finding_recorded_during_scan(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from dora_roi.collectors.clickops import ExternalPrincipal
+
+        principal = ExternalPrincipal(account_id="999988887777", role_name="MysteryRole", has_external_id=False)
+        self._scan(tmp_path, monkeypatch, [principal])
+
+        output = runner.invoke(app, ["check", "-o", str(tmp_path)]).output
+        assert "999988887777" in output
+        assert "MysteryRole" in output
+
+    def test_with_no_recorded_principal_check_says_nothing_about_one(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Paired with the positive case above: the wiring must not manufacture a finding."""
+        self._scan(tmp_path, monkeypatch, [])
+        output = runner.invoke(app, ["check", "-o", str(tmp_path)]).output
+        assert "999988887777" not in output
+
+    def test_export_check_counts_the_recorded_principal_as_one_more_warning(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import re
+
+        from dora_roi.collectors.clickops import ExternalPrincipal
+
+        clean = tmp_path / "clean"
+        flagged = tmp_path / "flagged"
+        principal = ExternalPrincipal(account_id="999988887777", role_name="MysteryRole", has_external_id=False)
+
+        self._scan(clean, monkeypatch, [])
+        self._scan(flagged, monkeypatch, [principal])
+
+        clean_output = runner.invoke(app, ["export", "-o", str(clean), "--check"]).output
+        flagged_output = runner.invoke(app, ["export", "-o", str(flagged), "--check"]).output
+
+        clean_match = re.search(r"(\d+) warning", clean_output)
+        flagged_match = re.search(r"(\d+) warning", flagged_output)
+        assert clean_match and flagged_match, (clean_output, flagged_output)
+        assert int(flagged_match.group(1)) == int(clean_match.group(1)) + 1
+
+
 class TestConsolePerimeterSurface:
     """I4: the console surface (`describe()`, `_print_perimeter`,
     `PERIMETER_WARNING`) had zero test coverage before this fix round, which

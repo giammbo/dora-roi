@@ -48,6 +48,7 @@ __all__ = [
     "PreflightError",
     "Severity",
     "load_prefill",
+    "load_unnamed_principals",
     "preflight",
     "summarise_findings",
 ]
@@ -159,12 +160,7 @@ def load_prefill(path: str | Path) -> RegisterOfInformation:
     than by a regulator.
     """
     path = Path(path)
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except FileNotFoundError as e:
-        raise PreflightError(f"prefill not found: {path}. Run `dora-roi scan -o <dir>` first.") from e
-    except json.JSONDecodeError as e:
-        raise PreflightError(f"{path} is not valid JSON: {e}") from e
+    payload = _read_prefill_json(path)
 
     templates = payload.get("templates") or {}
     if not isinstance(templates, dict):
@@ -182,6 +178,62 @@ def load_prefill(path: str | Path) -> RegisterOfInformation:
         else:
             getattr(roi, attribute).extend(built)
     return roi
+
+
+def load_unnamed_principals(path: str | Path) -> list[ExternalPrincipal]:
+    """The external accounts a scan recorded but could not name, read back out of a prefill.
+
+    ``_perimeter`` (``cli.py``) already serialises ``sources.unnamed_principals``
+    into ``roi_prefill.json``'s ``perimeter.unnamed_principals`` — a list of
+    ``[account_id, role_name, has_external_id]`` triples, a tuple round-tripped
+    through JSON as a 3-element array. Nothing needs to be persisted again; the
+    gap was only ever on the read side, since :func:`load_prefill` looks at
+    ``payload["templates"]`` alone and drops the rest of the document.
+
+    A prefill written before this feature existed — or one hand-edited without
+    the key — has no ``perimeter.unnamed_principals`` at all, and that must
+    read as "none recorded", not as a malformed file: the key's absence is the
+    expected shape for last week's scan output, not a corruption of it.
+    """
+    path = Path(path)
+    payload = _read_prefill_json(path)
+
+    perimeter = payload.get("perimeter") or {}
+    if not isinstance(perimeter, dict):
+        raise PreflightError(f"{path}: `perimeter` must be an object.")
+    raw = perimeter.get("unnamed_principals") or []
+    if not isinstance(raw, list):
+        raise PreflightError(f"{path}: `perimeter.unnamed_principals` must be an array.")
+
+    principals: list[ExternalPrincipal] = []
+    for entry in raw:
+        try:
+            account_id, role_name, has_external_id = entry
+        except (TypeError, ValueError) as e:
+            raise PreflightError(
+                f"{path}: each entry of `perimeter.unnamed_principals` must be "
+                "[account_id, role_name, has_external_id]."
+            ) from e
+        principals.append(
+            ExternalPrincipal(account_id=account_id, role_name=role_name, has_external_id=bool(has_external_id))
+        )
+    return principals
+
+
+def _read_prefill_json(path: Path) -> dict[str, Any]:
+    """Parse ``roi_prefill.json``, or raise a message a human can act on.
+
+    Shared by :func:`load_prefill` and :func:`load_unnamed_principals`: both
+    read the same file and must fail identically on "missing" and "not JSON" —
+    the two ways this step can go wrong before either function's own,
+    section-specific validation starts.
+    """
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError as e:
+        raise PreflightError(f"prefill not found: {path}. Run `dora-roi scan -o <dir>` first.") from e
+    except json.JSONDecodeError as e:
+        raise PreflightError(f"{path} is not valid JSON: {e}") from e
 
 
 def _build_row(model: type[RoIRow], entry: Any, template: str, path: Path) -> RoIRow:

@@ -59,7 +59,14 @@ from dora_roi.collectors.tfstate import (
 )
 from dora_roi.enrichment.gleif import GleifClient, GleifError, MatchType
 from dora_roi.enrichment.mapping import MappingError, ProviderMapping, load_mapping, provider_to_tpp
-from dora_roi.export.preflight import PreflightError, Severity, load_prefill, preflight, summarise_findings
+from dora_roi.export.preflight import (
+    PreflightError,
+    Severity,
+    load_prefill,
+    load_unnamed_principals,
+    preflight,
+    summarise_findings,
+)
 from dora_roi.export.xbrl_csv import ExportError, PackageName, write_package
 from dora_roi.models.enums import FieldStatus, ICTServiceType, IdentifierType
 from dora_roi.models.templates import (
@@ -276,7 +283,8 @@ def _export(
     software: bool,
 ) -> None:
     roi = load_prefill(output / "roi_prefill.json")
-    findings = preflight(roi)
+    unnamed_principals = load_unnamed_principals(output / "roi_prefill.json")
+    findings = preflight(roi, unnamed_principals=unnamed_principals)
     summary = summarise_findings(findings)
 
     for finding in [f for f in findings if f.severity is Severity.BLOCKING][:20]:
@@ -354,6 +362,7 @@ def check(
 
 def _check(output: Path, fail_on: str, use_gleif: bool) -> None:
     roi = load_prefill(output / "roi_prefill.json")
+    unnamed_principals = load_unnamed_principals(output / "roi_prefill.json")
 
     client = None
     if use_gleif:
@@ -363,7 +372,7 @@ def _check(output: Path, fail_on: str, use_gleif: bool) -> None:
             err.print(f"[yellow]Warning:[/yellow] GLEIF unavailable, checking LEIs offline only ({e}).")
 
     try:
-        findings = preflight(roi, gleif=client)
+        findings = preflight(roi, gleif=client, unnamed_principals=unnamed_principals)
     finally:
         if client is not None:
             client.close()

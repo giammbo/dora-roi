@@ -15,6 +15,7 @@ from dora_roi.export.preflight import (
     PreflightError,
     Severity,
     load_prefill,
+    load_unnamed_principals,
     preflight,
     summarise_findings,
 )
@@ -278,6 +279,66 @@ class TestLoadPrefill:
     def test_a_missing_file(self, tmp_path: Path) -> None:
         with pytest.raises(PreflightError, match="nope.json"):
             load_prefill(tmp_path / "nope.json")
+
+
+class TestLoadUnnamedPrincipals:
+    """`_perimeter` (cli.py) already writes these into roi_prefill.json's
+    `perimeter.unnamed_principals`; this is the reader `check`/`export` use."""
+
+    def test_a_prefill_with_no_perimeter_key_at_all_yields_no_principals(self, tmp_path: Path) -> None:
+        """A prefill written before this feature existed has no `perimeter` key.
+        That must read as "none recorded", not as an error."""
+        path = tmp_path / "roi_prefill.json"
+        path.write_text(json.dumps({"templates": {}}))
+        assert load_unnamed_principals(path) == []
+
+    def test_a_perimeter_with_no_unnamed_principals_key_yields_no_principals(self, tmp_path: Path) -> None:
+        path = tmp_path / "roi_prefill.json"
+        path.write_text(json.dumps({"templates": {}, "perimeter": {"state_files": []}}))
+        assert load_unnamed_principals(path) == []
+
+    def test_it_reconstructs_the_recorded_triples(self, tmp_path: Path) -> None:
+        path = tmp_path / "roi_prefill.json"
+        path.write_text(
+            json.dumps(
+                {
+                    "templates": {},
+                    "perimeter": {
+                        "unnamed_principals": [
+                            ["999988887777", "MysteryRole", False],
+                            ["111122223333", "OtherRole", True],
+                        ]
+                    },
+                }
+            )
+        )
+        principals = load_unnamed_principals(path)
+        assert [(p.account_id, p.role_name, p.has_external_id) for p in principals] == [
+            ("999988887777", "MysteryRole", False),
+            ("111122223333", "OtherRole", True),
+        ]
+
+    def test_a_missing_file_is_the_same_actionable_error_as_load_prefill(self, tmp_path: Path) -> None:
+        with pytest.raises(PreflightError, match="nope.json"):
+            load_unnamed_principals(tmp_path / "nope.json")
+
+    def test_a_malformed_entry_is_reported_not_silently_dropped(self, tmp_path: Path) -> None:
+        path = tmp_path / "roi_prefill.json"
+        path.write_text(json.dumps({"templates": {}, "perimeter": {"unnamed_principals": [["only-one-field"]]}}))
+        with pytest.raises(PreflightError, match="unnamed_principals"):
+            load_unnamed_principals(path)
+
+    def test_a_non_object_perimeter_is_rejected(self, tmp_path: Path) -> None:
+        path = tmp_path / "roi_prefill.json"
+        path.write_text(json.dumps({"templates": {}, "perimeter": "not an object"}))
+        with pytest.raises(PreflightError, match="perimeter"):
+            load_unnamed_principals(path)
+
+    def test_a_non_array_unnamed_principals_is_rejected(self, tmp_path: Path) -> None:
+        path = tmp_path / "roi_prefill.json"
+        path.write_text(json.dumps({"templates": {}, "perimeter": {"unnamed_principals": "not a list"}}))
+        with pytest.raises(PreflightError, match="unnamed_principals"):
+            load_unnamed_principals(path)
 
 
 class TestEbaValidationRules:
