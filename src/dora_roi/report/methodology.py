@@ -426,14 +426,24 @@ def _accounts_swept_section(perimeter: dict[str, Any]) -> list[str]:
             # refused, and must not be described as one.
             out += [f"No account could be resolved to sweep: {aws_sweep_refusal}.", ""]
         elif unreachable_accounts:
-            # Not "refused": no call was ever made to be refused. Every
-            # account this run resolved to sweep failed at session
-            # construction, which this document keeps apart from a refusal
-            # everywhere else it renders one (R2) and must keep apart here.
+            # Not "refused" — this document keeps a channel refusal apart
+            # from a session that never came up (R2). But not "nothing
+            # happened" either: `_session` (clickops.py) issues
+            # `sts:AssumeRole` *before* a session exists, and
+            # `_sweep_accounts` (cli.py) synthesises a `role_arn` for every
+            # organisation account whenever `assume_role_name` is set — so
+            # the ordinary failure here is AWS refusing that very call. The
+            # first draft of this sentence said no call was made, three lines
+            # above quoting the AccessDenied AWS returned to the call that
+            # was made: this task's own conflation, inverted.
             out += [
                 "Every account this run resolved to sweep failed before a usable session "
-                "existed, so no call was made in any of them and none of the three channels "
-                "above ran anywhere. Each is named below with the failure that stopped it.",
+                "existed, so none of the three channels above ran in any of them. That is "
+                "not the same as nothing having been attempted: establishing a session can "
+                "itself require an `sts:AssumeRole` call, made before the session exists, "
+                "which AWS can refuse — so the failure quoted with each account below may "
+                "be a denial of that call rather than a credential that was never there. "
+                "Each message says which of the two it was.",
                 "",
             ]
         else:
@@ -489,7 +499,14 @@ def _accounts_swept_section(perimeter: dict[str, Any]) -> list[str]:
             "the perimeter whether or not a table can put a vendor's name to it. Inventing "
             "one from an account number nobody vouched for would turn a hypothesis into a "
             "fact this register has no right to assert, so it is declared as an unknown "
-            "instead:",
+            "instead.",
+            "",
+            "*Outside* is decided by subtraction, and it is worth knowing what from: an "
+            "account is listed here when it is neither the account being swept nor a member "
+            "account AWS Organizations named. On a run where Organizations could not be "
+            "read, that second list is empty — so a sibling account in your own "
+            "organisation appears below exactly as a third party would. Check each against "
+            "your own account list before treating it as one.",
             "",
         ]
         for entry in unnamed_principals:
@@ -572,7 +589,18 @@ def to_markdown(
     elif swept_accounts:
         clickops_line = f"swept {len(swept_accounts)} account(s) — see *Accounts swept* below"
     else:
-        clickops_line = "configured, but no account was reached — see *Accounts swept* below"
+        # Two different runs land here: one where accounts were resolved and
+        # every session failed, and one where the `aws:` block resolved to no
+        # account at all, which never tried to reach anything. *Accounts
+        # swept* tells those apart in three branches of its own; this line
+        # must not pick one of them.
+        clickops_line = (
+            "configured, but nothing was swept — see *Accounts swept* below for whether any "
+            "account was resolved at all, and what stopped the ones that were"
+        )
+
+    overlay_path = perimeter.get("overlay")
+    overlay_line = f"{overlay_path} supplied" if overlay_path else "none supplied"
 
     if not aws_read:
         marketplace_line = "not read"
@@ -589,8 +617,12 @@ def to_markdown(
         f"- **AWS click-ops discovery** (identity providers, cross-account trust, partner event sources): "
         f"{clickops_line}",
         f"- **Kubernetes:** {perimeter['kubernetes'] if perimeter.get('kubernetes') else 'not read'}",
-        f"- **GLEIF:** {'consulted' if perimeter.get('gleif') else 'not consulted'}",
-        f"- **Manual overlay:** {perimeter.get('overlay') or 'none supplied'}",
+        # "consulted" and a bare path both reported an outcome off a value
+        # that only records a setting: `_perimeter` writes `use_gleif` and the
+        # overlay's path, and neither is touched when a lookup fails or an
+        # overlay entry matches nothing. Both lines now say what the value is.
+        f"- **GLEIF:** {'enabled' if perimeter.get('gleif') else 'not enabled'}",
+        f"- **Manual overlay:** {overlay_line}",
         "",
         "## What was deliberately not read",
         "",
@@ -601,12 +633,27 @@ def to_markdown(
     # that nothing was skipped on purpose; saying "every source named above
     # was read in full" put a claim about outcomes on a list that records
     # intentions, and a run with three IAM denials printed it verbatim.
-    out += [f"- {note}" for note in excluded] or [
-        "- Nothing in reach was skipped on purpose. This section records only what this "
-        "run chose not to read; a source it did try to read and could not is reported "
-        "with the channel it belongs to, not here."
-    ]
+    out += [f"- {note}" for note in excluded] or ["- Nothing in reach was skipped on purpose."]
+    # The replacement for that sentence went on to claim every failed read is
+    # reported with its channel. Three are reported nowhere in this file:
+    # `collect_organization` (cli.py), `_enrich_with_gleif`'s client
+    # construction and per-row lookup, and `apply_overlay`'s warnings all
+    # print to stderr and put nothing in the perimeter dict this module is
+    # rendered from. Recording them is a change to the CLI's wiring and is
+    # tracked separately; until then this document names its own blind spot
+    # rather than implying it has none.
     out += [
+        "",
+        "This section records what this run chose **not** to read, never what it tried to "
+        "read and could not. Most failed reads are reported with the channel they belong "
+        "to instead — under *What was read*, and per account under *Accounts swept*. "
+        "Three are reported nowhere in this document: **AWS Organizations**, the **GLEIF "
+        "lookup**, and an **overlay entry naming a provider no channel found**. Each of "
+        "those warns on the terminal and records nothing this file can see, so the lines "
+        "above still read *read*, *enabled* and the overlay's own path even on the run "
+        "where one of them failed. That is this document's blind spot, stated here "
+        "because it cannot be seen from anywhere else in it; the same run's terminal "
+        "output is where those three are visible.",
         "",
         "Beyond that, anything outside the sources above is invisible to this method: resources "
         "created by hand, SaaS bought on a card, and any contract with no infrastructure footprint "
@@ -627,7 +674,15 @@ def to_markdown(
         "|---|---:|---|",
         f"| Filled | {summary.filled} | An authoritative source said so: a GLEIF exact match, "
         f"a billing API, or a human assertion in the overlay. |",
-        f"| Inferred | {summary.inferred} | Derived from a mapping or from infrastructure. "
+        # "a mapping or infrastructure" named two of the five sources that
+        # actually write INFERRED. A GLEIF answer that is not an exact match
+        # on an overlay-asserted name (`source="gleif"`), a Marketplace figure
+        # attributed to a provider by name (`aws:ce`), and dora-roi's own
+        # cross-template join (`dora-roi`) are none of the two.
+        f"| Inferred | {summary.inferred} | Derived rather than asserted: from the packaged "
+        f"mapping, from infrastructure, from a GLEIF answer that is not an exact match on a "
+        f"name a person asserted, from a billing figure attributed to a provider by name, or "
+        f"from dora-roi's own join between templates. "
         f"**Reviewed by a person before filing, or it is a guess.** |",
         # Not "no source could produce a value": a field holding a value that
         # carries no recorded basis is counted here too (the warning below
@@ -674,8 +729,12 @@ def to_markdown(
         "",
         "## Evidence",
         "",
+        # Not "the AWS channel and account": Marketplace records `aws:ce`,
+        # a channel with no account in it (clickops.py). Only the three
+        # per-account channels tag their account.
         "- `inventory.json` — every provider found, with where each was found: a state "
-        "file, a cluster, or the AWS channel and account that named it.",
+        "file, a cluster, or the AWS channel that named it — with the account too, where "
+        "the channel is one that sweeps per account.",
         "- `gap-report.md` / `.json` — every field, its basis, and whether it blocks a filing.",
         "- `roi_prefill.json` — the register itself, keyed by official field code, each value "
         "paired with the basis recorded for it, where one was recorded.",

@@ -99,7 +99,23 @@ class TestTheThingsAnAuditorAsksFirst:
         body = note()
         assert "AWS Organizations and Cost Explorer:** read" in body
         assert "Kubernetes:** not read" in body
-        assert "GLEIF:** consulted" in body
+        assert "GLEIF:** enabled" in body
+
+    def test_the_gleif_and_overlay_lines_report_the_setting_not_the_outcome(self) -> None:
+        """G3: `_perimeter` writes `use_gleif` and the overlay's path, and
+        neither is touched when `GleifClient()` fails to construct, a lookup
+        raises, or an overlay entry names a provider no channel found. Saying
+        "consulted", or printing the path bare, reported an outcome off a
+        value that only records a setting."""
+        body = note(perimeter={**PERIMETER, "gleif": True, "overlay": "vendors.yaml"})
+        assert "GLEIF:** consulted" not in body
+        assert "GLEIF:** enabled" in body
+        assert "Manual overlay:** vendors.yaml supplied" in body
+
+    def test_gleif_and_overlay_still_say_when_they_were_off(self) -> None:
+        body = note(perimeter={**PERIMETER, "gleif": False, "overlay": None})
+        assert "GLEIF:** not enabled" in body
+        assert "Manual overlay:** none supplied" in body
 
     def test_it_refuses_to_be_read_as_a_compliance_statement(self) -> None:
         assert "not a compliance statement" in flat(note())
@@ -148,6 +164,30 @@ class TestWhatWasDeliberatelyNotRead:
         # it used to contradict are still rendered.
         assert "Nothing in reach was skipped on purpose" in body
         assert "Identity providers: refused" in body
+
+    def test_the_section_names_the_three_failures_it_cannot_see(self) -> None:
+        """G2: the F4 replacement claimed a failed read is reported with its
+        channel. Three are reported nowhere in this document —
+        `collect_organization`, `_enrich_with_gleif` (both the client and each
+        lookup) and `apply_overlay`'s warnings all print to stderr and put
+        nothing in the perimeter dict this module renders from. Recording them
+        is a change to the CLI's wiring, tracked separately; until then the
+        document names its own blind spot rather than implying it has none."""
+        body = flat(note())
+        assert "Three are reported nowhere in this document" in body
+        for subsystem in ("AWS Organizations", "GLEIF lookup", "overlay entry naming a provider"):
+            assert subsystem in body, subsystem
+        # And it says what those lines will wrongly read on such a run, so the
+        # caveat is checkable against the document above it rather than vague.
+        assert "still read *read*, *enabled* and the overlay's own path" in body
+        assert "the same run's terminal output is where those three are visible" in body
+
+    def test_the_blind_spot_is_stated_even_when_something_was_excluded(self) -> None:
+        """It is a property of the document, not of the empty-`excluded`
+        branch — a run that did skip a remote state must not lose it."""
+        body = flat(note(excluded=["s3://b/ workspace 'staging' (not selected)"]))
+        assert "workspace 'staging'" in body
+        assert "Three are reported nowhere in this document" in body
 
     def test_the_shadow_it_limit_is_stated_either_way(self) -> None:
         assert "does not claim to be complete" in flat(note())
@@ -212,6 +252,30 @@ class TestWhatTheRegisterAsserts:
         body = note()
         assert "authoritative source said so" in flat(body)
         assert "Reviewed by a person before filing, or it is a guess" in flat(body)
+
+    def test_the_inferred_cell_names_every_source_that_writes_inferred(self) -> None:
+        """G3: "Derived from a mapping or from infrastructure" named two of
+        the five. A GLEIF answer that is not an exact match on an
+        overlay-asserted name (`source="gleif"`), a Marketplace figure
+        attributed by name (`aws:ce`), and dora-roi's own cross-template join
+        (`dora-roi`) are neither a mapping nor infrastructure."""
+        body = flat(note())
+        assert "Derived from a mapping or from infrastructure." not in body
+        for origin in (
+            "the packaged mapping",
+            "from infrastructure",
+            "not an exact match on a name a person asserted",
+            "billing figure attributed to a provider by name",
+            "dora-roi's own join between templates",
+        ):
+            assert origin in body, origin
+
+    def test_the_evidence_bullet_does_not_promise_an_account_for_every_channel(self) -> None:
+        """G3: Marketplace records `source_files={"aws:ce"}` — a channel with
+        no account in it. Only the three per-account channels tag one."""
+        body = flat(note())
+        assert "the AWS channel and account that named it" not in body
+        assert "where the channel is one that sweeps per account" in body
 
     def test_the_per_template_table_is_there(self) -> None:
         assert "| B_05.01 |" in note()
@@ -384,6 +448,33 @@ class TestTheHonestySurface:
         # actual rendered line instead.
         assert "Identity providers: read, no result" not in denied
         assert "Identity providers: refused" in denied
+
+    def test_nothing_swept_does_not_pick_one_of_its_two_causes(self) -> None:
+        """G3: "configured, but no account was reached" is rendered on two
+        different runs — one where accounts resolved and every session failed,
+        and one where the `aws:` block resolved to no account at all, which
+        never tried to reach anything. *Accounts swept* tells those apart in
+        three branches; this line must not pick one of them."""
+        never_resolved = flat(to_markdown([], _perimeter(aws_sweep_configured=True), []))
+        assert "no account was reached" not in never_resolved
+        assert "configured, but nothing was swept" in never_resolved
+        # The line that does distinguish is still the one carrying the answer.
+        assert "did not resolve to a single account" in never_resolved
+
+    def test_an_outside_principal_says_what_outside_was_subtracted_from(self) -> None:
+        """G3: `_collect_aws` passes `own_accounts=frozenset()` when
+        Organizations could not be read, and `collect_trust_relationships`
+        excludes only `own_accounts` and the swept account itself — so on
+        exactly that run a sibling account in the same organisation is
+        reported here as if it were a third party."""
+        body = flat(
+            to_markdown([], _perimeter(swept=[("111122223333", [])], unnamed=[("999988887777", "Mystery", False)]), [])
+        )
+        assert "decided by subtraction" in body
+        assert "a sibling account in your own organisation appears below exactly as a third party would" in body
+        # The finding itself is still asserted, not softened away.
+        assert "999988887777" in body
+        assert "without an `sts:ExternalId` condition" in body
 
     def test_an_unnamed_external_principal_is_stated_not_hidden(self) -> None:
         note = to_markdown(
@@ -781,7 +872,36 @@ class TestTheHonestySurface:
         )
         assert "refused before a usable session existed" not in body
         assert "failed before a usable session existed" in body
-        assert "no call was made in any of them" in body
+        assert "none of the three channels above ran in any of them" in body
+
+    def test_a_session_that_never_came_up_is_not_described_as_no_call_at_all(self) -> None:
+        """G1: `_session` issues `sts:AssumeRole` *before* a session exists,
+        and `_sweep_accounts` synthesises a `role_arn` for every organisation
+        account whenever `assume_role_name` is set — so the ordinary failure
+        on this path is AWS refusing that call. "No call was made in any of
+        them" sat three lines above the quoted AccessDenied AWS returned to
+        the call that was made: this task's own conflation, inverted."""
+        body = flat(
+            to_markdown(
+                [],
+                _perimeter(
+                    unreachable=[
+                        (
+                            "555566667777",
+                            "no usable credentials (could not assume "
+                            "arn:aws:iam::555566667777:role/DoraReader: AccessDenied)",
+                        )
+                    ]
+                ),
+                [],
+            )
+        )
+        assert "no call was made" not in body
+        assert "not the same as nothing having been attempted" in body
+        assert "which AWS can refuse" in body
+        # The denial it would have contradicted is still rendered, verbatim,
+        # below the sentence that now allows for it.
+        assert "could not assume arn:aws:iam::555566667777:role/DoraReader: AccessDenied" in body
 
 
 class TestRefusedChannels:
