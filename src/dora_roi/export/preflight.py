@@ -29,6 +29,7 @@ from typing import Any, Protocol
 
 from pydantic import ValidationError
 
+from dora_roi.collectors.clickops import ANY_ACCOUNT, ExternalPrincipal
 from dora_roi.models.enums import FieldStatus
 from dora_roi.models.templates import (
     FIELD_CATALOG,
@@ -40,12 +41,14 @@ from dora_roi.models.templates import (
     RegisterOfInformation,
     RoIRow,
 )
+from dora_roi.naming import vendor_key
 
 __all__ = [
     "Finding",
     "PreflightError",
     "Severity",
     "load_prefill",
+    "load_unnamed_principals",
     "preflight",
     "summarise_findings",
 ]
@@ -111,12 +114,23 @@ class Finding:
     row_key: str = ""
 
 
-def preflight(roi: RegisterOfInformation, *, gleif: _LeiLookup | None = None) -> list[Finding]:
+def preflight(
+    roi: RegisterOfInformation,
+    *,
+    gleif: _LeiLookup | None = None,
+    unnamed_principals: Sequence[ExternalPrincipal] = (),
+) -> list[Finding]:
     """Every check, blocking findings first.
 
     ``gleif`` is optional and only used to confirm that an LEI exists and is
     ACTIVE. Without it the LEI checks stay offline and cover format and
     presence, which is most of the failure mode already.
+
+    ``unnamed_principals`` is not a field on ``RegisterOfInformation`` and
+    never will be: it is :mod:`.collectors.clickops`' output, and giving the
+    model a field for it would make ``models/`` import from ``collectors/``,
+    inverting the layering this repo keeps. The caller (``cli.py``, which
+    already imports both) threads the list through here instead.
     """
     findings: list[Finding] = []
     findings += _check_completeness(roi)
@@ -125,6 +139,8 @@ def preflight(roi: RegisterOfInformation, *, gleif: _LeiLookup | None = None) ->
     findings += _check_supply_chain(roi)
     findings += _check_arrangements(roi)
     findings += _check_duplicate_codes(roi)
+    findings += _check_duplicate_vendors(roi)
+    findings += _check_unnamed_principals(unnamed_principals)
     findings += _check_eba_rules(roi)
     findings += _check_domain_data()
     return sorted(findings, key=lambda f: (0 if f.severity is Severity.BLOCKING else 1, f.template, f.field))
@@ -144,12 +160,7 @@ def load_prefill(path: str | Path) -> RegisterOfInformation:
     than by a regulator.
     """
     path = Path(path)
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except FileNotFoundError as e:
-        raise PreflightError(f"prefill not found: {path}. Run `dora-roi scan -o <dir>` first.") from e
-    except json.JSONDecodeError as e:
-        raise PreflightError(f"{path} is not valid JSON: {e}") from e
+    payload = _read_prefill_json(path)
 
     templates = payload.get("templates") or {}
     if not isinstance(templates, dict):
@@ -167,6 +178,62 @@ def load_prefill(path: str | Path) -> RegisterOfInformation:
         else:
             getattr(roi, attribute).extend(built)
     return roi
+
+
+def load_unnamed_principals(path: str | Path) -> list[ExternalPrincipal]:
+    """The external accounts a scan recorded but could not name, read back out of a prefill.
+
+    ``_perimeter`` (``cli.py``) already serialises ``sources.unnamed_principals``
+    into ``roi_prefill.json``'s ``perimeter.unnamed_principals`` — a list of
+    ``[account_id, role_name, has_external_id]`` triples, a tuple round-tripped
+    through JSON as a 3-element array. Nothing needs to be persisted again; the
+    gap was only ever on the read side, since :func:`load_prefill` looks at
+    ``payload["templates"]`` alone and drops the rest of the document.
+
+    A prefill written before this feature existed — or one hand-edited without
+    the key — has no ``perimeter.unnamed_principals`` at all, and that must
+    read as "none recorded", not as a malformed file: the key's absence is the
+    expected shape for last week's scan output, not a corruption of it.
+    """
+    path = Path(path)
+    payload = _read_prefill_json(path)
+
+    perimeter = payload.get("perimeter") or {}
+    if not isinstance(perimeter, dict):
+        raise PreflightError(f"{path}: `perimeter` must be an object.")
+    raw = perimeter.get("unnamed_principals") or []
+    if not isinstance(raw, list):
+        raise PreflightError(f"{path}: `perimeter.unnamed_principals` must be an array.")
+
+    principals: list[ExternalPrincipal] = []
+    for entry in raw:
+        try:
+            account_id, role_name, has_external_id = entry
+        except (TypeError, ValueError) as e:
+            raise PreflightError(
+                f"{path}: each entry of `perimeter.unnamed_principals` must be "
+                "[account_id, role_name, has_external_id]."
+            ) from e
+        principals.append(
+            ExternalPrincipal(account_id=account_id, role_name=role_name, has_external_id=bool(has_external_id))
+        )
+    return principals
+
+
+def _read_prefill_json(path: Path) -> dict[str, Any]:
+    """Parse ``roi_prefill.json``, or raise a message a human can act on.
+
+    Shared by :func:`load_prefill` and :func:`load_unnamed_principals`: both
+    read the same file and must fail identically on "missing" and "not JSON" —
+    the two ways this step can go wrong before either function's own,
+    section-specific validation starts.
+    """
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError as e:
+        raise PreflightError(f"prefill not found: {path}. Run `dora-roi scan -o <dir>` first.") from e
+    except json.JSONDecodeError as e:
+        raise PreflightError(f"{path} is not valid JSON: {e}") from e
 
 
 def _build_row(model: type[RoIRow], entry: Any, template: str, path: Path) -> RoIRow:
@@ -415,6 +482,163 @@ def _check_duplicate_codes(roi: RegisterOfInformation) -> list[Finding]:
         for code, names in sorted(seen.items())
         if len(names) > 1
     ]
+
+
+def _check_duplicate_vendors(roi: RegisterOfInformation) -> list[Finding]:
+    """Two provider rows whose legal names normalise to the same key.
+
+    :func:`dora_roi.naming.vendor_key` is deliberately blunt and is used
+    elsewhere in this codebase only to *merge* — the whole point of that
+    bluntness is that fuzzy matching is refused for merging, because a silent
+    fuzzy merge makes one vendor disappear inside another and nobody finds
+    out. Here the same key is used the opposite way: to *ask*. Two rows that
+    collide on it are surfaced to a person and left exactly as they were,
+    because a fuzzy warning puts both rows in front of someone who knows which
+    one is their real counterparty — a judgement this tool cannot make and
+    must not guess at.
+    """
+    groups: dict[str, list[str]] = {}
+    for index, provider in enumerate(roi.providers, start=1):
+        if not provider.legal_name:
+            continue
+        groups.setdefault(vendor_key(provider.legal_name), []).append(_row_key(provider, index))
+
+    findings: list[Finding] = []
+    for key, names in sorted(groups.items()):
+        if len(names) < 2:
+            continue
+        findings.append(
+            Finding(
+                code="POSSIBLE_DUPLICATE_VENDOR",
+                severity=Severity.WARNING,
+                message=(
+                    f"{len(names)} providers normalise to the same name ({key!r}): {', '.join(names)}. "
+                    "They may be one vendor filed as two rows, typically an AWS Marketplace seller name "
+                    "that was never merged with its Terraform provider entry."
+                ),
+                fix=(
+                    "Check which row names your actual contractual counterparty — the legal name on the "
+                    "invoice or LEI record, not the one that happens to read cleaner — and correct or "
+                    "remove the other. This is flagged rather than merged automatically: this tool refuses "
+                    "fuzzy matching for merging because a silent merge can fold two genuinely distinct "
+                    "companies into one row with nobody noticing, which is worse than two rows that turn "
+                    "out to both be true. Only a person who knows the counterparty can tell which case "
+                    "this is."
+                ),
+                template="B_05.01",
+                field="0050",
+                row_key=names[0],
+            )
+        )
+    return findings
+
+
+def _check_unnamed_principals(unnamed_principals: Sequence[ExternalPrincipal]) -> list[Finding]:
+    """An outside AWS account can assume a role here, and no table can name it.
+
+    :class:`.collectors.clickops.ExternalPrincipal` is itself the finding this
+    channel exists to produce: golden rule 1 forbids turning an account number
+    nobody vouched for into a vendor name, so the account lands here instead
+    of as a guessed row in ``B_05.01``. "An external account has standing
+    access and this register cannot say whose it is" is a true, actionable
+    statement an auditor can act on — unlike a guessed name that turns out
+    wrong.
+
+    ``ExternalPrincipal`` does not record which of the scanned AWS accounts
+    grants the access (a known, deferred gap in the collector), so the message
+    below does not claim to know that either. Nor does it claim the account is
+    a third party: *outside* is decided by subtracting the accounts AWS
+    Organizations named, and on a run where that call was refused there is
+    nothing to subtract, so a sibling account in the filer's own organisation
+    reaches this function exactly as a vendor's would. ``methodology.md``
+    carries that caveat for the run that produced the prefill; ``check`` and
+    ``export`` read only ``roi_prefill.json``, whose perimeter records no
+    signal that Organizations failed, so the caveat travels in the message
+    itself rather than being left to a document this command never mentions
+    (finding C7).
+
+    An ``account_id`` of :data:`.clickops.ANY_ACCOUNT` is a different finding
+    with the same shape and gets its own code and its own sentence: the trust
+    policy named no counterparty because its principal restricts to no
+    account. It stays a WARNING rather than becoming BLOCKING because
+    *blocking* means "a filing built from this register is expected to be
+    refused" — this is a finding about the estate, not a defect in the
+    register's own fields.
+    """
+    return [
+        _wildcard_finding(principal) if principal.account_id == ANY_ACCOUNT else _unnamed_finding(principal)
+        for principal in unnamed_principals
+    ]
+
+
+def _unnamed_finding(principal: ExternalPrincipal) -> Finding:
+    return Finding(
+        code="UNIDENTIFIED_EXTERNAL_PRINCIPAL",
+        severity=Severity.WARNING,
+        message=(
+            f"AWS account {principal.account_id} can assume the role {principal.role_name!r} and no "
+            "table names it as a vendor: an external account has standing access and this register "
+            "cannot say whose it is. If AWS Organizations could not be read on the scan that wrote "
+            "this file, an account of your own organisation appears here exactly as a third party "
+            "would — that scan prints such a failure as a warning on its terminal output, which is "
+            "where to check whether it happened."
+        ),
+        fix=(
+            f"Find out who controls AWS account {principal.account_id} and either add it to the "
+            "account-ID mapping or the overlay so it becomes a named provider row, or remove the "
+            "trust relationship if it is stale. dora-roi will not guess a legal name from a bare "
+            "account number — that would turn a hypothesis into a fact, which this tool's "
+            "provenance rule forbids."
+            + (
+                ""
+                if principal.has_external_id
+                else " The trust also has no sts:ExternalId condition, so anyone who controls that "
+                "account, not only your intended counterparty, can assume the role."
+            )
+        ),
+        template="B_05.01",
+        field="0050",
+        row_key=f"{principal.account_id}:{principal.role_name}",
+    )
+
+
+def _wildcard_finding(principal: ExternalPrincipal) -> Finding:
+    """The `Principal: "*"` case: no counterparty was named because none was named.
+
+    Deliberately a claim about the policy's principal and not about who can
+    really assume the role. A `Condition` on the same statement —
+    `aws:PrincipalOrgID` is the usual one — can narrow a `*` principal to
+    something quite specific, and dora-roi reads only `sts:ExternalId` out of
+    `Condition` (a known, deferred gap). Saying "every AWS account can assume
+    this" would therefore be false on a perfectly ordinary policy; saying "the
+    principal names no account, and here is what this tool did and did not
+    look at" is true on all of them.
+    """
+    return Finding(
+        code="WILDCARD_EXTERNAL_PRINCIPAL",
+        severity=Severity.WARNING,
+        message=(
+            f"The role {principal.role_name!r} names `*` as its trusted principal: it is restricted to no "
+            "AWS account, so this register cannot name a counterparty for it — the policy identifies "
+            "none. That is a different finding from a vendor dora-roi failed to identify."
+        ),
+        fix=(
+            f"Read the trust policy of {principal.role_name!r} and name the account(s) meant to assume it "
+            "in the principal itself, then re-run the scan. dora-roi does not evaluate the statement's "
+            "conditions, so it cannot tell you whether one (`aws:PrincipalOrgID`, for instance) already "
+            "narrows this in practice — check that before treating the role as either safe or open"
+            + (
+                ". The statement does carry an `sts:ExternalId` condition, which this tool does read: an "
+                "external ID is a shared string rather than an identity, so it narrows who knows the "
+                "secret, not who the counterparty is."
+                if principal.has_external_id
+                else ". The one condition this tool does read, `sts:ExternalId`, is absent."
+            )
+        ),
+        template="B_05.01",
+        field="0050",
+        row_key=f"*:{principal.role_name}",
+    )
 
 
 def _check_eba_rules(roi: RegisterOfInformation) -> list[Finding]:

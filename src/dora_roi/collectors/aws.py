@@ -38,18 +38,31 @@ AwsClient = Any
 
 __all__ = [
     "READ_ONLY_ACTIONS",
+    "REQUIRED_IAM_ACTIONS",
     "AwsError",
     "DiscoveredAccount",
     "ExpenseReport",
     "OrganizationInventory",
+    "annual_window",
     "collect_annual_expense",
     "collect_organization",
+    "cost_and_usage_pages",
     "expense_for_provider",
     "readonly",
 ]
 
-#: The IAM actions this tool ever calls. Ship this list; grant nothing else.
-#: Every one is a read — see :func:`readonly`, which enforces it in code.
+#: Historical, shape-only check: every entry here still looks like a read
+#: (``list_``/``describe_``/``get_``/``search`` verb), which is what
+#: :func:`test_every_documented_action_is_a_read` in ``tests/test_aws.py``
+#: asserts. It is **not** the policy to grant — it predates
+#: :data:`REQUIRED_IAM_ACTIONS` below, is scoped only to this module's own
+#: Organizations/Cost Explorer calls, and itself still names several actions
+#: (``ce:GetTags``, ``tag:GetResources``, ``tag:GetTagKeys``,
+#: ``resource-explorer-2:Search``, ``resource-explorer-2:ListViews``,
+#: ``iam:ListUsers``, ``organizations:ListAccounts``) that Task 10 of the
+#: clickops-aws-discovery run proved nothing in the codebase calls.
+#: :data:`REQUIRED_IAM_ACTIONS` is the one a user should grant; the README's
+#: published policy is checked against that constant, not this one.
 READ_ONLY_ACTIONS: tuple[str, ...] = (
     "organizations:DescribeOrganization",
     "organizations:ListRoots",
@@ -64,6 +77,49 @@ READ_ONLY_ACTIONS: tuple[str, ...] = (
     "resource-explorer-2:ListViews",
     "iam:ListRoles",
     "iam:ListUsers",
+)
+
+#: Every IAM action dora-roi can issue, across every collector — not just this
+#: module. The README publishes exactly this set as the policy to grant, and
+#: ``tests/test_iam_policy.py`` asserts the two agree, so the document cannot
+#: drift into promising less (a sweep that fails in the field) or asking for
+#: more (permissions a read-only tool has no business requesting) than the
+#: code actually does.
+#:
+#: Unlike :data:`READ_ONLY_ACTIONS` above — which predates this constant, is
+#: scoped only to this module's own Organizations/Cost Explorer calls, and
+#: itself names several actions nothing calls — this set was built by reading
+#: every ``readonly()`` call site plus the two declared ``sts:AssumeRole``
+#: exceptions and the one direct ``sts:GetCallerIdentity`` call, across
+#: ``aws.py``, ``clickops.py`` and ``sources.py``. See the README's IAM policy
+#: section for the file:line justifying each entry.
+REQUIRED_IAM_ACTIONS: frozenset[str] = frozenset(
+    {
+        # collect_organization() and its pagination helpers (aws.py)
+        "organizations:DescribeOrganization",
+        "organizations:ListRoots",
+        "organizations:ListAccountsForParent",
+        "organizations:ListOrganizationalUnitsForParent",
+        # collect_annual_expense() (aws.py) and collect_marketplace() (clickops.py)
+        "ce:GetCostAndUsage",
+        # calling_account() (aws.py) — labels which account Cost Explorer answered for
+        "sts:GetCallerIdentity",
+        # fetch_sources()'s S3 backend reader (sources.py)
+        "s3:GetObject",
+        "s3:ListBucket",
+        # the assume_role_name sweep shortcut (clickops.py) and the S3 role_arn
+        # option (sources.py) — a declared exception to golden rule 2, not a read
+        "sts:AssumeRole",
+        # collect_identity_providers() (clickops.py)
+        "iam:ListSAMLProviders",
+        "iam:GetSAMLProvider",
+        "iam:ListOpenIDConnectProviders",
+        "iam:GetOpenIDConnectProvider",
+        # collect_trust_relationships() (clickops.py)
+        "iam:ListRoles",
+        # collect_partner_event_sources() (clickops.py)
+        "events:ListEventSources",
+    }
 )
 
 _READ_PREFIXES = ("list_", "describe_", "get_", "search")
@@ -265,6 +321,47 @@ def calling_account(profile: str | None = None) -> str | None:
         return None
 
 
+def annual_window(today: date | None = None) -> tuple[date, date]:
+    """Trailing twelve whole months, ending at the start of the current one.
+
+    Whole months, ending at the start of the current one: a partial month would
+    make an "annual" figure quietly smaller than a year. Shared by every caller
+    that asks Cost Explorer for a year of spend, so this definition of "a year"
+    lives in exactly one place instead of drifting between channels.
+    """
+    end = (today or date.today()).replace(day=1)
+    start = end.replace(year=end.year - 1)
+    return start, end
+
+
+def cost_and_usage_pages(client: CostExplorerClient, **kwargs: Any) -> list[dict[str, Any]]:
+    """Every page of one ``get_cost_and_usage`` request, concatenated.
+
+    Cost Explorer paginates a single grouped request over ``NextPageToken``
+    once the result set is large enough — a different field name again from
+    Organizations' ``NextToken`` (:func:`_pages`), IAM's ``Marker`` and
+    EventBridge's own ``NextToken``. A silently truncated page makes a real
+    group vanish exactly the way one that never existed does, which is
+    indistinguishable from the outside.
+
+    Shared by both callers rather than written twice: the Marketplace channel
+    in :mod:`.clickops` (grouped by ``LEGAL_ENTITY_NAME``, the only channel
+    that ever produces FILLED) and :func:`collect_annual_expense` below
+    (grouped by ``SERVICE``, which produces *more* groups over the same
+    window, so it is the likelier of the two to paginate). The first had this
+    loop and the second read a single page — the invariant established on the
+    lower-risk instance and violated on the higher one (finding C4).
+    """
+    results: list[dict[str, Any]] = []
+    token: str | None = None
+    while True:
+        page = readonly(client, "get_cost_and_usage", **kwargs, **({"NextPageToken": token} if token else {}))
+        results.extend(page.get("ResultsByTime", []))
+        token = page.get("NextPageToken")
+        if not token:
+            return results
+
+
 def collect_annual_expense(
     *,
     client: CostExplorerClient | None = None,
@@ -277,22 +374,36 @@ def collect_annual_expense(
     Whole months, ending at the start of the current one: a partial month would
     make the register's "annual expense" quietly smaller than a year.
     """
-    client = client if client is not None else _ce_client(profile)
-    end = (today or date.today()).replace(day=1)
-    start = end.replace(year=end.year - 1)
+    start, end = annual_window(today)
+    try:
+        from botocore.exceptions import BotoCoreError, ClientError
 
-    response = readonly(
-        client,
-        "get_cost_and_usage",
-        TimePeriod={"Start": start.isoformat(), "End": end.isoformat()},
-        Granularity="MONTHLY",
-        Metrics=[_COST_METRIC],
-        GroupBy=[{"Type": "DIMENSION", "Key": "SERVICE"}],
-    )
+        client = client if client is not None else _ce_client(profile)
+        results = cost_and_usage_pages(
+            client,
+            TimePeriod={"Start": start.isoformat(), "End": end.isoformat()},
+            Granularity="MONTHLY",
+            Metrics=[_COST_METRIC],
+            GroupBy=[{"Type": "DIMENSION", "Key": "SERVICE"}],
+        )
+    except AwsError:
+        raise
+    except ImportError as e:  # pragma: no cover - depends on install extras
+        raise AwsError(
+            "the AWS collector needs the `aws` extra: install with `uv tool install 'dora-roi[aws]'`."
+        ) from e
+    except (BotoCoreError, ClientError) as e:
+        # Narrowed to botocore's own exception hierarchy on purpose: this is
+        # the one caller-visible boundary between "AWS said no" (missing
+        # credentials, a denied permission, a throttled call — degrade to a
+        # warning) and a genuine bug in this function's own parsing below,
+        # which must still surface as the unexpected error it is rather than
+        # being reported as "Cost Explorer unavailable".
+        raise AwsError(f"Cost Explorer unavailable: {type(e).__name__}: {e}") from e
 
     totals: dict[str, Decimal] = {}
     currency: str | None = None
-    for window in response.get("ResultsByTime", []):
+    for window in results:
         for group in window.get("Groups", []):
             metric = group.get("Metrics", {}).get(_COST_METRIC, {})
             unit = metric.get("Unit")

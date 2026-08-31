@@ -106,6 +106,14 @@ auth0:
   services: [S19, S04]
   notes: Okta subsidiary since 2021 — ultimate parent is Okta, Inc.
 
+onelogin:
+  vendor: OneLogin, Inc.
+  hq_country: US
+  services: [S19, S04]
+  notes: >-
+    Identity provider; acquired by One Identity (a Quest Software company) in
+    2021 — check the current contracting entity and ultimate parent.
+
 pagerduty:
   vendor: PagerDuty, Inc.
   hq_country: US
@@ -365,3 +373,36 @@ amplitude:
   hq_country: US
   services: [S19, S06]
   notes: Product analytics.
+
+# --- Reached through an EventBridge partner event source, not a Terraform
+# provider or a DNS record ---------------------------------------------------
+# A SaaS pushing events straight into your account's default bus is a vendor
+# relationship even though nothing in your Terraform state or your DNS zone
+# names it. AWS's own published EventBridge SaaS partners; the key is what the
+# EventBridge collector (`collectors/clickops.py`) emits.
+
+shopify:
+  vendor: Shopify Inc.
+  hq_country: CA
+  services: [S19, S18]
+  notes: >-
+    E-commerce platform; found here only through its EventBridge partner event
+    source, since it carries no Terraform provider of its own.
+
+# --- Reached through a cross-account IAM trust policy, not a Terraform
+# provider, a DNS record, or an EventBridge source ---------------------------
+# An outside AWS account allowed to assume a role in yours names itself by a
+# bare account ID, not a hostname or a provider block. The key is what
+# `collect_trust_relationships` (`collectors/clickops.py`) resolves the
+# account ID to, via `data/aws_vendor_accounts.yaml` — a table that is
+# incomplete by construction, see that file's own header.
+
+snyk:
+  vendor: Snyk Limited
+  hq_country: GB
+  services: [S19, S04]
+  notes: >-
+    Found here only through its AWS cross-account trust-policy integration
+    (Snyk Cloud); Snyk Limited is UK-incorporated per Companies House, but a US
+    or reseller contract may run through a different Snyk entity — verify
+    against your own contract.

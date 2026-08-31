@@ -1,0 +1,41 @@
+# AWS account IDs a vendor assumes a role from, mapped to the provider key the
+# register merges on. Every key here must exist in provider_mapping.yaml.
+#
+# INCOMPLETE BY CONSTRUCTION, and that is the point. An account this table does
+# not know is reported as an unnamed external principal, never as a vendor with
+# a guessed name: "an external account has standing access and we cannot say
+# whose" is a true statement an auditor can act on, and a wrong company name in
+# a regulatory filing is not.
+#
+# Adding an entry: cite a public source for the account ID in the comment,
+# checked directly (fetch the page, don't trust a search-result snippet). A
+# pull request that adds an account ID without a verified public source is
+# not merged.
+#
+# ALWAYS QUOTE THE KEY, exactly like the two rows below ("464622532012", not
+# 464622532012). An unquoted key whose digits are all 0-7 and starts with a
+# 0 — 004622532012, say — is valid YAML but parses as an octal integer, and
+# turns into a different 12-digit string than the one written down. A test
+# (`test_every_vendor_account_id_is_a_bare_12_digit_string`) checks every key
+# is exactly 12 digits, but it cannot tell a correctly-quoted ID from a wrong
+# number that merely happens to also be 12 digits after the damage is done.
+#
+
+# Two of the four candidate rows this table started with (Task 6's brief) were
+# dropped rather than shipped on an unverified guess:
+#   - Wiz: no public source for any AWS account ID was found. Wiz's own docs
+#     describe the trust policy as something copied from the product per
+#     tenant, not a number published anywhere.
+#   - Vanta: same story — Vanta's own help center says the account you trust
+#     is shown inside the product, not published, and two independent
+#     third-party Terraform modules that hardcode Vanta account IDs disagree
+#     with the brief's number *and* list three different numbers between
+#     themselves for "multi-region support". Three candidates with no way to
+#     confirm any of them against Vanta's own documentation is not a source,
+#     it is three guesses.
+# Re-add either only against a citable, directly-verified page.
+
+"464622532012": datadog  # github.com/DataDog/cloudformation-template, aws/datadog_integration_role.yaml —
+                          # the DdAWSAccountId parameter's default, commented "DO NOT CHANGE!"
+"370134896156": snyk     # aws-ia.github.io/cfn-ps-snyk-security — the AWS Partner Solution Snyk says (on
+                          # its own blog) it built; deployment parameter "Snyk Cloud AWS account number"

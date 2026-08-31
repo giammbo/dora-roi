@@ -22,18 +22,37 @@ from typing import Any
 
 import typer
 from rich.console import Console
+from rich.markup import escape
 from rich.table import Table
 
 from dora_roi import __version__
 from dora_roi.collectors.aws import (
     AwsError,
+    OrganizationInventory,
     calling_account,
     collect_annual_expense,
     collect_organization,
     expense_for_provider,
 )
+from dora_roi.collectors.clickops import (
+    ANY_ACCOUNT,
+    ClickopsError,
+    ExternalPrincipal,
+    VendorFact,
+    aws_regions,
+    collect_clickops,
+    collect_marketplace,
+)
 from dora_roi.collectors.k8s import K8sError, collect_kubernetes
-from dora_roi.collectors.sources import SourceError, StateSource, fetch_sources, load_sources
+from dora_roi.collectors.sources import (
+    AwsAccount,
+    AwsSweep,
+    SourceError,
+    StateSource,
+    fetch_sources,
+    load_aws_sweep,
+    load_sources,
+)
 from dora_roi.collectors.tfstate import (
     DiscoveredProvider,
     TfstateError,
@@ -43,7 +62,14 @@ from dora_roi.collectors.tfstate import (
 )
 from dora_roi.enrichment.gleif import GleifClient, GleifError, MatchType
 from dora_roi.enrichment.mapping import MappingError, ProviderMapping, load_mapping, provider_to_tpp
-from dora_roi.export.preflight import PreflightError, Severity, load_prefill, preflight, summarise_findings
+from dora_roi.export.preflight import (
+    PreflightError,
+    Severity,
+    load_prefill,
+    load_unnamed_principals,
+    preflight,
+    summarise_findings,
+)
 from dora_roi.export.xbrl_csv import ExportError, PackageName, write_package
 from dora_roi.models.enums import FieldStatus, ICTServiceType, IdentifierType
 from dora_roi.models.templates import (
@@ -58,6 +84,7 @@ from dora_roi.models.templates import (
 )
 from dora_roi.overlay.vendors import OverlayError, apply_overlay, load_overlay, overlay_template
 from dora_roi.report.gap import build_gap_report, summarize, to_json, to_markdown
+from dora_roi.report.methodology import refusal_kind, refused_channels
 from dora_roi.report.methodology import to_markdown as methodology_markdown
 
 EXIT_OK = 0
@@ -70,12 +97,36 @@ DISCLAIMER = (
     "it reaches a filing."
 )
 PERIMETER_WARNING = (
-    "Only what is described in the sources above was scanned. Anything outside them — shadow IT, "
-    "click-ops resources, contracts with no infrastructure footprint — is invisible to this tool."
+    "The channels named above are the whole of this run's scope; nothing outside them was "
+    "attempted. Being in scope is not the same as having been read cleanly — every entry those channels "
+    "recorded (refused, unparseable, unreached, unattempted, unavailable, or answered without a usable "
+    "answer) is printed above under one of those headings, in full and by name, never folded silently "
+    "into a clean read. A vendor that leaves no trace "
+    "anywhere in scope — a SaaS bought on a card, a contract with no infrastructure footprint at all — "
+    "is exactly as invisible to this tool as it always was: discovering more here changes how much of "
+    "the visible estate this tool can read, not the size of what it cannot. This register does not "
+    "claim to be complete."
 )
 
 console = Console()
 err = Console(stderr=True)
+
+
+def _plain(value: object) -> str:
+    """Text from outside the CLI, made safe to hand to rich.
+
+    Rich reads ``[…]`` as a style tag and deletes what it does not recognise.
+    Exception messages routinely contain square brackets, and the one users
+    actually hit is the worst possible case: the ImportError that says to
+    install ``dora-roi[aws]`` reaches the terminal as ``dora-roi``, telling
+    somebody already stuck to run the command that put them there.
+
+    So every value that did not come from this module is escaped before it is
+    interpolated. The ``[red]``/``[yellow]`` labels around it are ours and stay
+    markup.
+    """
+    return escape(str(value))
+
 
 app = typer.Typer(
     name="dora-roi",
@@ -103,7 +154,7 @@ def overlay_init(
 ) -> None:
     """Write a commented vendors.yaml, seeded with the providers the last scan found."""
     if to.exists() and not force:
-        err.print(f"[red]Error:[/red] {to} already exists. Pass --force to overwrite it.")
+        err.print(f"[red]Error:[/red] {_plain(to)} already exists. Pass --force to overwrite it.")
         raise typer.Exit(EXIT_USER_ERROR)
 
     names: list[str] = []
@@ -114,9 +165,14 @@ def overlay_init(
             names = [p["name"] for p in json.loads(inventory.read_text())["providers"]]
             resolved = _already_settled(output / "roi_prefill.json", names)
         except (json.JSONDecodeError, KeyError, TypeError) as e:
-            err.print(f"[yellow]Warning:[/yellow] could not read {inventory} ({e}); writing an empty template.")
+            err.print(
+                f"[yellow]Warning:[/yellow] could not read {_plain(inventory)} "
+                f"({_plain(e)}); writing an empty template."
+            )
     else:
-        err.print(f"[yellow]Warning:[/yellow] no {inventory} found. Run `dora-roi scan` first for a seeded template.")
+        err.print(
+            f"[yellow]Warning:[/yellow] no {_plain(inventory)} found. Run `dora-roi scan` first for a seeded template."
+        )
 
     to.write_text(overlay_template(names, resolved), encoding="utf-8")
     console.print(f"Wrote [bold]{to}[/bold] with {len(names)} provider block(s), all commented out.")
@@ -183,6 +239,14 @@ def _already_settled(prefill: Path, names: list[str]) -> dict[str, dict[str, str
     Only FILLED counts. An INFERRED value is a guess, and telling somebody a
     guess is "already confirmed" is how the overlay stops being the place where
     facts are asserted.
+
+    Matched to ``names`` by ``source_key``, never by list position. Both lists
+    come from the same scan, but a vendor-discovery channel can fold a new
+    provider into ``inventory.json``'s ``discovered`` order without touching
+    ``roi_prefill.json``'s ``rows`` order the same way — a positional zip would
+    then hand one provider's confirmed legal name and LEI to a different
+    provider's block, silently and plausibly. `overlay/vendors.py` documents
+    dropping the identical assumption for the same reason.
     """
     if not prefill.is_file():
         return {}
@@ -194,8 +258,12 @@ def _already_settled(prefill: Path, names: list[str]) -> dict[str, dict[str, str
     by_code = {
         info.alias: attribute for attribute, info in ThirdPartyProvider.model_fields.items() if info.alias is not None
     }
+    by_source_key = {row["source_key"]: row for row in rows if isinstance(row, dict) and row.get("source_key")}
     settled: dict[str, dict[str, str]] = {}
-    for name, row in zip(names, rows, strict=False):
+    for name in names:
+        row = by_source_key.get(name)
+        if row is None:
+            continue
         settled[name] = {
             by_code[code]: str(row["values"].get(code))
             for code, entry in (row.get("provenance") or {}).items()
@@ -227,7 +295,7 @@ def export(
     except typer.Exit:
         raise
     except Exception as e:  # noqa: BLE001 - the CLI boundary is where unexpected stops
-        err.print(f"[red]Unexpected error:[/red] {type(e).__name__}: {e}")
+        err.print(f"[red]Unexpected error:[/red] {type(e).__name__}: {_plain(e)}")
         raise typer.Exit(EXIT_UNEXPECTED) from e
 
 
@@ -241,11 +309,12 @@ def _export(
     software: bool,
 ) -> None:
     roi = load_prefill(output / "roi_prefill.json")
-    findings = preflight(roi)
+    unnamed_principals = load_unnamed_principals(output / "roi_prefill.json")
+    findings = preflight(roi, unnamed_principals=unnamed_principals)
     summary = summarise_findings(findings)
 
     for finding in [f for f in findings if f.severity is Severity.BLOCKING][:20]:
-        err.print(f"[red]BLOCKING[/red] {finding.template}.{finding.field} {finding.message}")
+        err.print(f"[red]BLOCKING[/red] {finding.template}.{finding.field} {_plain(finding.message)}")
     console.print(f"[red]{summary['blocking']} blocking[/red] · [yellow]{summary['warning']} warning[/yellow]")
 
     if check_only:
@@ -304,7 +373,7 @@ def check(
     step you are not ready for.
     """
     if fail_on not in {"none", "blocking", "any"}:
-        err.print(f"[red]Error:[/red] --fail-on must be none, blocking or any, not {fail_on!r}.")
+        err.print(f"[red]Error:[/red] --fail-on must be none, blocking or any, not {_plain(repr(fail_on))}.")
         raise typer.Exit(EXIT_USER_ERROR)
     try:
         _check(output, fail_on, gleif)
@@ -313,22 +382,23 @@ def check(
     except typer.Exit:
         raise
     except Exception as e:  # noqa: BLE001 - the CLI boundary is where unexpected stops
-        err.print(f"[red]Unexpected error:[/red] {type(e).__name__}: {e}")
+        err.print(f"[red]Unexpected error:[/red] {type(e).__name__}: {_plain(e)}")
         raise typer.Exit(EXIT_UNEXPECTED) from e
 
 
 def _check(output: Path, fail_on: str, use_gleif: bool) -> None:
     roi = load_prefill(output / "roi_prefill.json")
+    unnamed_principals = load_unnamed_principals(output / "roi_prefill.json")
 
     client = None
     if use_gleif:
         try:
             client = GleifClient()
         except Exception as e:  # noqa: BLE001 - a GLEIF outage must not fail a check
-            err.print(f"[yellow]Warning:[/yellow] GLEIF unavailable, checking LEIs offline only ({e}).")
+            err.print(f"[yellow]Warning:[/yellow] GLEIF unavailable, checking LEIs offline only ({_plain(e)}).")
 
     try:
-        findings = preflight(roi, gleif=client)
+        findings = preflight(roi, gleif=client, unnamed_principals=unnamed_principals)
     finally:
         if client is not None:
             client.close()
@@ -340,7 +410,18 @@ def _check(output: Path, fail_on: str, use_gleif: bool) -> None:
     table.add_column("Field")
     table.add_column("Row")
     table.add_column("What")
-    for finding in findings[:40]:
+    # Every finding, never a capped slice. The cap that used to sit here
+    # printed the first 40 and pointed at gap-report.json for the rest, which
+    # holds `GapEntry` rows and has never held a `Finding` at all — so the
+    # remainder was not anywhere the user was sent. And findings sort
+    # blocking-first, while `_check_completeness` emits one blocking finding
+    # per mandatory-missing field per row: on any register that has not been
+    # overlaid yet, every warning this command has to give — an unnamed
+    # external principal, a wildcard trust — fell past the cap (finding C5).
+    # `_print_refusals` reached the same conclusion one round earlier, for
+    # the same reason: a long list is the honest cost of declaring
+    # everything, not a reason to hide part of it.
+    for finding in findings:
         colour = "red" if finding.severity is Severity.BLOCKING else "yellow"
         table.add_row(
             f"[{colour}]{finding.severity}[/{colour}]",
@@ -350,8 +431,6 @@ def _check(output: Path, fail_on: str, use_gleif: bool) -> None:
             finding.message,
         )
     console.print(table)
-    if len(findings) > 40:
-        console.print(f"[dim]… and {len(findings) - 40} more. The full list is in gap-report.json.[/dim]")
 
     console.print(f"\n[red]{summary['blocking']} blocking[/red] · [yellow]{summary['warning']} warning[/yellow]")
     if summary["blocking"]:
@@ -379,6 +458,7 @@ def scan(
     """Discover, enrich and prefill, then write the register and the gap report."""
     try:
         remote = load_sources(sources_file) if sources_file else []
+        aws_sweep = load_aws_sweep(sources_file) if sources_file else None
     except SourceError as e:
         _fail(e)
     sources = _Sources(
@@ -386,6 +466,7 @@ def scan(
         remote=remote,
         aws=aws,
         aws_profile=aws_profile,
+        aws_sweep=aws_sweep,
         k8s=k8s or k8s_context is not None or kubeconfig is not None,
         k8s_context=k8s_context,
         kubeconfig=kubeconfig,
@@ -394,12 +475,12 @@ def scan(
         _fail(ValueError("nothing to scan: pass -s/--state, --sources, --aws or --k8s."))
     try:
         _scan(sources, output, gleif, mapping_file, overlay_file)
-    except (TfstateError, MappingError, OverlayError, AwsError, K8sError, SourceError) as e:
+    except (TfstateError, MappingError, OverlayError, AwsError, ClickopsError, K8sError, SourceError) as e:
         _fail(e)
     except typer.Exit:
         raise
     except Exception as e:  # noqa: BLE001 - the CLI boundary is where unexpected stops
-        err.print(f"[red]Unexpected error:[/red] {type(e).__name__}: {e}")
+        err.print(f"[red]Unexpected error:[/red] {type(e).__name__}: {_plain(e)}")
         err.print("[dim]This is a bug. Please open an issue with the command you ran.[/dim]")
         raise typer.Exit(EXIT_UNEXPECTED) from e
 
@@ -412,6 +493,12 @@ class _Sources:
     remote: list[StateSource] = field(default_factory=list)
     aws: bool = False
     aws_profile: str | None = None
+    #: Which accounts the vendor-discovery channels sweep, and whose
+    #: credentials — the ``aws:`` block of a ``--sources`` file. ``None`` when
+    #: no such file was given: marketplace still runs (it needs only the
+    #: top-level profile), but the per-account channels have no account list
+    #: to sweep without one.
+    aws_sweep: AwsSweep | None = None
     k8s: bool = False
     k8s_context: str | None = None
     kubeconfig: Path | None = None
@@ -421,6 +508,60 @@ class _Sources:
 
     #: What was in reach and deliberately not read, for the methodology note.
     excluded: list[str] = field(default_factory=list)
+
+    #: What the vendor-discovery channels said no to: a bad profile, an
+    #: unassumable role, a denied IAM or Cost Explorer call. Task 8 renders
+    #: this in the methodology note the same way `excluded` already is. Kept
+    #: around even now that `swept_accounts`/`unreachable_accounts` carry the
+    #: per-account facts, because the *global* refusals — Cost Explorer,
+    #: Marketplace, `assume_role_name` never resolving to an account, no
+    #: region ever known for EventBridge — belong to no single account.
+    clickops_refused: list[str] = field(default_factory=list)
+    #: External AWS accounts with standing access (a trust policy naming them)
+    #: that no table could name as a vendor. Task 8 raises this as a finding.
+    unnamed_principals: list[ExternalPrincipal] = field(default_factory=list)
+    #: (account_id, refusals recorded during that one account's own sweep),
+    #: for every account a session was actually usable for. The refusal list
+    #: is `sources.clickops_refused[before:after]` for that account's own
+    #: `collect_clickops` call — captured by identity, never reconstructed
+    #: from the flat `clickops_refused` list by parsing an account id back out
+    #: of a message string. A review of the first cut of this field found
+    #: exactly why that reconstruction cannot be trusted: an account keyed by
+    #: a `role_arn` contains a `/`, and the EventBridge refusal format packs
+    #: `<account>/<region>` into one field, so splitting on the first `/`
+    #: silently misfiled the refusal under the wrong account and rendered a
+    #: denied call as a clean empty result.
+    swept_accounts: list[tuple[str, list[str]]] = field(default_factory=list)
+    #: What `collect_clickops` found in one account, as the evidence keys
+    #: `_channel_evidence` derives from its own unmerged result — one entry
+    #: per account, positionally aligned with `swept_accounts` (index *i*
+    #: here is that account's own evidence). Keys, not providers: an
+    #: `ExternalPrincipal` is a finding of the trust channel that never
+    #: becomes a provider at all, and a list of providers has nowhere to
+    #: put it (finding C2).
+    #:
+    #: A list, not a dict keyed by account_id: `account_id` is not
+    #: guaranteed unique (two profile-only sweep entries with neither `id`
+    #: nor `role_arn` both fall back to the literal string "unknown
+    #: account"), and a review found that a dict silently drops the first
+    #: such account's evidence under the second's key (R4) — ugly before,
+    #: lossy once this field existed to be keyed at all.
+    #:
+    #: `tfstate.merge_providers` unions `resource_types` and `source_files`
+    #: by provider name across *every* account and channel it is ever
+    #: called with (by design — it is what lets one vendor's evidence from
+    #: two accounts become one row) which also destroys, once merged, which
+    #: channel in which account actually found something. The methodology
+    #: note needs that association kept apart, per account, or two accounts
+    #: sharing one vendor render as if each had every channel the other
+    #: actually used.
+    swept_evidence: list[list[str]] = field(default_factory=list)
+    #: (account_id, message) for every account named to be swept whose
+    #: session could never be established at all — a `boto3.Session` that
+    #: failed to construct, or a `role_arn` that could not be assumed. Kept
+    #: apart from `swept_accounts`: that account was never reached, which is
+    #: a different, earlier fact than being reached and refused on a channel.
+    unreachable_accounts: list[tuple[str, str]] = field(default_factory=list)
 
     def any(self) -> bool:
         return bool(self.states) or bool(self.remote) or self.aws or self.k8s
@@ -446,9 +587,52 @@ class _Sources:
             lines = [f"Terraform state: {len(self.declared)} files"] + [f"  {w}" for w in self.declared]
         if self.aws:
             lines.append(f"AWS Organizations + Cost Explorer (profile: {self.aws_profile or 'default'})")
+            lines.append("AWS Marketplace (billing)")
+            # The other three click-ops channels — identity providers, trust
+            # relationships, partner event sources — need an `aws:` sweep
+            # block to know which accounts to visit at all; a bare `--aws`
+            # with no `--sources` file runs Marketplace alone, and this line
+            # is what stops that reading as "every AWS channel was swept".
+            if self.aws_sweep is not None:
+                lines.append(self._click_ops_discovery_line())
+            else:
+                lines.append("AWS click-ops discovery: not swept (no --sources aws: block given)")
         if self.k8s:
             lines.append(f"Kubernetes (context: {self.k8s_context or 'current'})")
         return lines
+
+    def _click_ops_discovery_line(self) -> str:
+        """C2: "swept N account(s)" alone reads as "N accounts read cleanly" —
+        it said nothing about `swept_accounts` entries that were refused on
+        every channel, or accounts named to sweep that were never reached at
+        all. Both belong on the terminal, not only in methodology.md, because
+        this line is the one every user sees on every run.
+
+        The refused count comes from `methodology.refused_channels`, the same
+        function whose verdict methodology.md's own per-channel lines render.
+        Counting `refusal_kind(r) == "denied"` lines instead — which is what
+        this did — answers a different question and gave a different answer:
+        one denied `iam:ListSAMLProviders` is such a line, but methodology.md
+        renders that account "read, but could not fully enumerate this
+        account's identity providers", so a single IAM denial printed "1 with
+        at least one channel refused" here against a document, written by the
+        same run, saying the channel had been read (F1).
+
+        An account whose refusals cost it part of a channel rather than the
+        whole of it, or that carries a refusal this note cannot attribute,
+        earns no caveat on this line — the refusal itself still reaches the
+        terminal in full, one paragraph below, through `_print_refusals`.
+        """
+        refused_count = sum(1 for account_id, refusals in self.swept_accounts if refused_channels(account_id, refusals))
+        base = f"AWS click-ops discovery: swept {len(self.swept_accounts)} account(s)"
+        caveats = []
+        if refused_count:
+            caveats.append(f"{refused_count} with at least one channel refused")
+        if self.unreachable_accounts:
+            caveats.append(f"{len(self.unreachable_accounts)} named but never reached")
+        if not caveats:
+            return base
+        return f"{base} ({'; '.join(caveats)} — see methodology.md)"
 
 
 def _scan(
@@ -490,12 +674,18 @@ def _scan(
     mapping = load_mapping(mapping_file)
 
     rows = [provider_to_tpp(provider, mapping) for provider in discovered]
-    if use_gleif:
-        _enrich_with_gleif(rows)
 
+    # Before GLEIF, not after: a vendor Marketplace or the account sweep finds
+    # that Terraform never mentioned still deserves an LEI lookup, and
+    # `_collect_aws` is what appends its row. Running GLEIF first would leave
+    # every clickops-discovered provider without one, silently, just because
+    # it was found a few lines later than everything else.
     group_entities: list[GroupEntity] = []
     if sources.aws:
-        group_entities = _collect_aws(discovered, rows, sources.aws_profile)
+        group_entities = _collect_aws(discovered, rows, mapping, sources)
+
+    if use_gleif:
+        _enrich_with_gleif(rows)
 
     arrangements, links = _synthesise_arrangements(discovered, mapping)
     roi = RegisterOfInformation(
@@ -507,7 +697,7 @@ def _scan(
     if overlay_file is not None:
         overlay = load_overlay(overlay_file)
         for warning in apply_overlay(roi, overlay):
-            err.print(f"[yellow]Warning:[/yellow] {warning}")
+            err.print(f"[yellow]Warning:[/yellow] {_plain(warning)}")
 
     # After the overlay, never before: the provider code it carries is usually
     # the only one there is. B_05.02 keys on 0010/0020/0030/0050/0060, so a link
@@ -539,7 +729,7 @@ def _enrich_with_gleif(rows: list[ThirdPartyProvider]) -> None:
     try:
         client = GleifClient()
     except Exception as e:  # noqa: BLE001 - constructing a client must not kill a scan
-        err.print(f"[yellow]Warning:[/yellow] GLEIF unavailable, continuing without LEIs ({e}).")
+        err.print(f"[yellow]Warning:[/yellow] GLEIF unavailable, continuing without LEIs ({_plain(e)}).")
         return
 
     with client:
@@ -549,7 +739,9 @@ def _enrich_with_gleif(rows: list[ThirdPartyProvider]) -> None:
             try:
                 match = client.best_match(row.legal_name)
             except GleifError as e:
-                err.print(f"[yellow]Warning:[/yellow] GLEIF lookup for {row.legal_name!r} failed: {e}")
+                err.print(
+                    f"[yellow]Warning:[/yellow] GLEIF lookup for {_plain(repr(row.legal_name))} failed: {_plain(e)}"
+                )
                 continue
             if match is None:
                 continue
@@ -559,8 +751,18 @@ def _enrich_with_gleif(rows: list[ThirdPartyProvider]) -> None:
             # usually comes from the packaged mapping, which is a guess. So the
             # LEI of an entity we chose is not the same claim as the identity of
             # the counterparty, and only an overlay-asserted name makes it one.
+            #
+            # "Asserted" means the overlay specifically, not merely FILLED: a
+            # FILLED legal_name can now also come from an AWS Marketplace
+            # billing fact (`_apply_vendor_facts`, source "aws:ce") — a real
+            # fact about who invoices you, but not a human's word for which
+            # entity they contracted with, which is the one thing this branch
+            # exists to require. Checking `status_of` alone would let a
+            # billing line pass as an overlay assertion the moment
+            # `_collect_aws` runs before this function.
             exact = match.match_type is MatchType.EXACT
-            asserted = row.status_of("legal_name") is FieldStatus.FILLED
+            legal_name_provenance = row.provenance.get("legal_name")
+            asserted = legal_name_provenance is not None and legal_name_provenance.source == "overlay"
             status = FieldStatus.FILLED if (exact and asserted) else FieldStatus.INFERRED
 
             if not exact:
@@ -570,11 +772,23 @@ def _enrich_with_gleif(rows: list[ThirdPartyProvider]) -> None:
             elif asserted:
                 note = "GLEIF exact match on the legal name asserted in the overlay."
             else:
+                # The name searched came from somewhere other than a human
+                # asserting it in the overlay — the packaged mapping's guess
+                # in the common case, but as of the AWS vendor-discovery
+                # channels it can also be a billing fact (source "aws:ce"):
+                # real, but a statement about who invoices you, not about who
+                # you contracted with. Naming the actual source keeps this
+                # note true in both cases instead of overclaiming "guessed"
+                # for a name AWS itself supplied.
+                origin = (
+                    "a billing fact (AWS knows who it invoices, not who you signed a contract with)"
+                    if legal_name_provenance is not None and legal_name_provenance.source == "aws:ce"
+                    else "the packaged provider mapping, not from your contract"
+                )
                 note = (
-                    f"GLEIF confirms that {match.legal_name!r} holds this LEI. The name itself came "
-                    f"from the packaged provider mapping, not from your contract — so what is "
-                    f"established is the LEI of the entity dora-roi guessed, not that it is your "
-                    f"counterparty. Assert the legal name in the overlay to settle it."
+                    f"GLEIF confirms that {match.legal_name!r} holds this LEI. The name itself came from "
+                    f"{origin} — so what is established is the LEI of the entity dora-roi named, not that "
+                    f"it is your counterparty. Assert the legal name in the overlay to settle it."
                 )
 
             row.identification_code = match.lei
@@ -654,19 +868,32 @@ def _synthesise_arrangements(
 
 
 def _collect_aws(
-    discovered: list[DiscoveredProvider], rows: list[ThirdPartyProvider], profile: str | None
+    discovered: list[DiscoveredProvider],
+    rows: list[ThirdPartyProvider],
+    mapping: dict[str, ProviderMapping],
+    sources: _Sources,
 ) -> list[GroupEntity]:
-    """Organizations into B_01.02 hints, Cost Explorer into the provider expense.
+    """Organizations, Cost Explorer, and every vendor-discovery channel: marketplace and the account sweep.
 
-    Both degrade to a warning. AWS being unreachable, or the caller lacking one
-    of the read permissions, is not a reason to throw away a scan that already
-    read the state files.
+    Every one of these degrades to a warning or a ``refused`` entry of its own:
+    AWS being unreachable, or the caller lacking one read permission, is not a
+    reason to throw away a scan that already read the state files, and one
+    channel failing is not a reason to skip the others.
+
+    ``discovered`` and ``rows`` are mutated in place: a vendor found only by
+    Marketplace, an identity provider, an EventBridge partner or a trust
+    policy has no Terraform footprint to have built a row from already, and
+    :func:`_fold_in` is what gives it one — the entire point of this module,
+    per its own docstring, since most of what it finds appears in no
+    ``required_providers`` block at all.
     """
+    profile = sources.aws_profile
     entities: list[GroupEntity] = []
+    organization: OrganizationInventory | None = None
     try:
         organization = collect_organization(profile=profile)
     except AwsError as e:
-        err.print(f"[yellow]Warning:[/yellow] AWS Organizations unavailable: {e}")
+        err.print(f"[yellow]Warning:[/yellow] AWS Organizations unavailable: {_plain(e)}")
     else:
         for account in organization.accounts:
             entity = GroupEntity(name=account.name, hierarchy=" / ".join(account.ou_path))
@@ -680,41 +907,288 @@ def _collect_aws(
     try:
         report = collect_annual_expense(profile=profile, payer_accounts=[billed] if billed else None)
     except (AwsError, NameError) as e:
-        err.print(f"[yellow]Warning:[/yellow] AWS Cost Explorer unavailable: {e}")
-        return entities
+        # `collect_annual_expense` now wraps botocore's own exceptions into
+        # `AwsError` itself (a missing credential, a denied permission, an
+        # unreachable region), so this catch is narrow on purpose: anything
+        # else is a genuine bug in that function and must surface as one,
+        # not be reported here as "Cost Explorer unavailable" and hidden from
+        # the CLI's own "this is a bug" path.
+        err.print(f"[yellow]Warning:[/yellow] AWS Cost Explorer unavailable: {_plain(e)}")
+        sources.clickops_refused.append(f"cost explorer: {e}")
+        report = None
 
-    master = organization.master_account_id if entities else None
-    if billed and master and billed != master:
-        err.print(
-            f"[yellow]Warning:[/yellow] Cost Explorer was called from account {billed}, which is not the "
-            f"organisation's payer ({master}). The figure covers that account's own spend only — for the "
-            f"whole organisation, re-run with the payer's profile."
-        )
-
-    for provider, row in zip(discovered, rows, strict=True):
-        amount = expense_for_provider(provider.name, report)
-        if amount is None:
-            continue
-        # AWS's own total needs no guess: the state says `hashicorp/aws` and the
-        # bill says AWS. A Marketplace seller is matched by name against our own
-        # table, so its figure inherits that table's uncertainty.
-        direct = provider.name == "aws"
-        status = FieldStatus.FILLED if direct else FieldStatus.INFERRED
-        note = (
-            report.provenance_note
-            if direct
-            else (
-                f"{report.provenance_note} Attributed to this provider by matching the seller name on "
-                f"the Marketplace line, which is dora-roi's own table and not a billing relationship "
-                f"AWS asserts."
+    if report is not None:
+        master = organization.master_account_id if organization is not None else None
+        if billed and master and billed != master:
+            err.print(
+                f"[yellow]Warning:[/yellow] Cost Explorer was called from account {billed}, which is not the "
+                f"organisation's payer ({master}). The figure covers that account's own spend only — for the "
+                f"whole organisation, re-run with the payer's profile."
             )
-        )
-        row.total_annual_expense = amount
-        row.mark("total_annual_expense", status, source="aws:ce", note=note)
-        if report.currency:
-            row.currency = report.currency
-            row.mark("currency", status, source="aws:ce", note=note)
+
+        for provider, row in zip(discovered, rows, strict=True):
+            amount = expense_for_provider(provider.name, report)
+            if amount is None:
+                continue
+            # AWS's own total needs no guess: the state says `hashicorp/aws` and the
+            # bill says AWS. A Marketplace seller is matched by name against our own
+            # table, so its figure inherits that table's uncertainty.
+            direct = provider.name == "aws"
+            status = FieldStatus.FILLED if direct else FieldStatus.INFERRED
+            note = (
+                report.provenance_note
+                if direct
+                else (
+                    f"{report.provenance_note} Attributed to this provider by matching the seller name on "
+                    f"the Marketplace line, which is dora-roi's own table and not a billing relationship "
+                    f"AWS asserts."
+                )
+            )
+            row.total_annual_expense = amount
+            row.mark("total_annual_expense", status, source="aws:ce", note=note)
+            if report.currency:
+                row.currency = report.currency
+                row.mark("currency", status, source="aws:ce", note=note)
+
+    # Marketplace answers for the payer, once, regardless of whether an `aws:`
+    # sweep block was ever configured — it needs nothing beyond the top-level
+    # profile, and it is the channel that makes a bare `--aws`, no state files
+    # at all, a scan worth running.
+    marketplace_providers, facts = collect_marketplace(profile=profile, refused=sources.clickops_refused)
+    _fold_in(discovered, rows, mapping, marketplace_providers)
+
+    own_accounts = frozenset(a.account_id for a in organization.accounts) if organization is not None else frozenset()
+    sweep = sources.aws_sweep
+    if sweep is not None:
+        accounts = _sweep_accounts(sweep, organization)
+        if not accounts and sweep.assume_role_name and organization is None:
+            sources.clickops_refused.append(
+                "aws sweep: assume_role_name is set but AWS Organizations was unreachable, so there is no "
+                "account list to assume it into."
+            )
+        # AWS providers only, never every region-shaped string in the state:
+        # `tfstate._region_of` reads a `region` attribute off any resource of
+        # any provider, so a DigitalOcean `nyc3` would otherwise be handed to
+        # `events.nyc3.amazonaws.com` and come back reported as an AWS
+        # refusal (finding C3). See `clickops.aws_regions`.
+        regions = aws_regions(discovered)
+        if not regions:
+            # EventBridge is regional and this channel only ever sweeps regions
+            # a state file (or Kubernetes) already named — see collect_clickops's
+            # own docstring. On a no-IaC scan that set is empty, so the
+            # EventBridge channel silently never runs for any account in the
+            # sweep. Silence and "checked, found nothing" are opposite claims;
+            # this is the former, and it must say so.
+            sources.clickops_refused.append(
+                "eventbridge: no regions known to sweep — no AWS resource in the perimeter named one "
+                "(a region belonging to another cloud is not an AWS region and is never swept), so "
+                "partner event sources were not read in any account."
+            )
+        for sweep_account in accounts:
+            account_id = sweep_account.id or sweep_account.role_arn or "unknown account"
+            # `collect_clickops` never raises; the only way to learn a session
+            # could not even be created for this account is to look for the
+            # specific refusal it appends on that path. `before`/`after` slices
+            # `clickops_refused` to exactly the messages this one call
+            # produced — the per-account refusal set, by construction, with
+            # nothing to reconstruct from a string afterwards.
+            before = len(sources.clickops_refused)
+            swept, unknown = collect_clickops(
+                profile=sweep_account.profile or sweep.profile,
+                role_arn=sweep_account.role_arn,
+                account_id=account_id,
+                own_accounts=own_accounts,
+                regions=regions,
+                refused=sources.clickops_refused,
+            )
+            account_refusals = sources.clickops_refused[before:]
+            _fold_in(discovered, rows, mapping, swept)
+            sources.unnamed_principals.extend(unknown)
+            session_failure = next(
+                (entry for entry in account_refusals if entry.startswith(f"{account_id}: no usable credentials")),
+                None,
+            )
+            if session_failure is not None:
+                # The session never came up at all: this account was not
+                # reached, and must not read as one that was reached and
+                # simply had nothing — `unreachable_accounts`'s own docstring
+                # states this requirement. Recorded by identity, keyed off the
+                # exact `account_id` this call used, never by re-parsing it
+                # out of the message afterwards.
+                sources.unreachable_accounts.append((account_id, session_failure[len(f"{account_id}: ") :]))
+            else:
+                # Reached, whether or not every channel inside it succeeded —
+                # a bad profile with dead-but-present credentials (no
+                # `role_arn`, so `boto3.Session()` never validates them until
+                # the first call) can still make every channel below fail, but
+                # each failure is then a per-channel refusal in
+                # `account_refusals`, not a session-level one. Recording the
+                # refusal list keyed by this exact `account_id` — never a
+                # value reconstructed by splitting the refusal text — is what
+                # lets the methodology note render each channel's own true
+                # state even for an account that is technically "swept" but
+                # refused on every one of them.
+                sources.swept_accounts.append((account_id, account_refusals))
+                # Appended in lockstep with `swept_accounts`, never keyed by
+                # `account_id` — see the field's own docstring for why (R4).
+                sources.swept_evidence.append(_channel_evidence(swept, unknown))
+
+    _apply_vendor_facts(rows, facts, sources.clickops_refused)
     return entities
+
+
+#: Two evidence keys that are no provider's ``resource_types`` key, because
+#: the thing they record is not a provider row. A trust policy naming an
+#: outside account this tool cannot name produces an
+#: :class:`.clickops.ExternalPrincipal` and nothing else — so an account whose
+#: only trust finding is a declared unknown carried no evidence at all, and the
+#: methodology note rendered its cross-account trust line *read, no result*:
+#: the same sentence it prints for an account whose roles nobody outside can
+#: assume (finding C2). The second key separates the worst case of all, a role
+#: whose principal names no account at all, from an unnamed but specific one.
+_TRUST_UNNAMED_EVIDENCE = "external_principal"
+_TRUST_WILDCARD_EVIDENCE = "wildcard_trust_principal"
+
+
+def _channel_evidence(providers: list[DiscoveredProvider], unknown: list[ExternalPrincipal]) -> list[str]:
+    """What one account's own sweep actually found, as channel-attributable keys.
+
+    Computed here, next to the ``collect_clickops`` call that produced both
+    lists, rather than in :func:`_perimeter`: ``unknown`` never becomes a
+    provider, so by the time the perimeter is serialised there is nothing left
+    to derive it from.
+    """
+    keys = {key for provider in providers for key in provider.resource_types}
+    if unknown:
+        keys.add(_TRUST_UNNAMED_EVIDENCE)
+    if any(principal.account_id == ANY_ACCOUNT for principal in unknown):
+        keys.add(_TRUST_WILDCARD_EVIDENCE)
+    return sorted(keys)
+
+
+def _sweep_accounts(sweep: AwsSweep, organization: OrganizationInventory | None) -> list[AwsAccount]:
+    """Which accounts the per-account channels read: explicit, or every member via one role.
+
+    Explicit accounts say exactly what will be read and always win outright —
+    the same "explicit beats a shortcut" rule :class:`.sources.AwsSweep`
+    documents for itself. The ``assume_role_name`` shortcut only ever fires
+    when nothing explicit was given *and* there is an organisation to
+    enumerate: asking to assume a role in "every account" means nothing
+    without a list of accounts to assume it in.
+    """
+    if sweep.accounts:
+        return list(sweep.accounts)
+    if sweep.assume_role_name and organization is not None:
+        return [
+            AwsAccount(
+                id=account.account_id,
+                role_arn=f"arn:aws:iam::{account.account_id}:role/{sweep.assume_role_name}",
+            )
+            for account in organization.accounts
+        ]
+    return []
+
+
+def _fold_in(
+    discovered: list[DiscoveredProvider],
+    rows: list[ThirdPartyProvider],
+    mapping: dict[str, ProviderMapping],
+    new: list[DiscoveredProvider],
+) -> None:
+    """Add what a vendor-discovery channel found, without duplicating a row.
+
+    A vendor a channel finds under a key some other source already claimed —
+    Marketplace billing ``datadog`` next to a Terraform ``datadog`` provider
+    block, or the same identity provider seen in two swept accounts — is the
+    same vendor, not two: :func:`.tfstate.merge_providers` folds the evidence
+    together, and the row that already exists for it is what
+    :func:`_apply_vendor_facts` updates next. Only a name genuinely new to
+    this scan earns a fresh, INFERRED row here.
+    """
+    if not new:
+        return
+    known = {provider.name for provider in discovered}
+    discovered[:] = merge_providers([discovered, new])
+    for provider in discovered:
+        if provider.name not in known:
+            rows.append(provider_to_tpp(provider, mapping))
+
+
+def _apply_vendor_facts(rows: list[ThirdPartyProvider], facts: list[VendorFact], refused: list[str]) -> None:
+    """Turn authoritative billing facts into FILLED fields.
+
+    This lives here and not in :func:`.mapping.provider_to_tpp` on purpose.
+    That function builds a row from the provider mapping, which is a table of
+    guesses, and it must stay structurally incapable of producing a FILLED
+    value even by accident — golden rule 1 is worth more as a property of the
+    code than as a review comment. Authoritative facts flow in from outside
+    it instead, applied here, after every row already exists.
+
+    The overlay still wins, per field, independently. A billing API knows who
+    invoices you; only a human holding the contract knows which entity was
+    actually signed with, and the two are different companies more often than
+    the bill suggests — legal name always defers to an existing FILLED value.
+    Annual spend is a different claim with its own guard: an overlay that
+    asserts the legal name but never touched the expense (or the reverse)
+    must not have the untouched field silently overwritten just because its
+    sibling was already settled.
+
+    Two facts under one key would mean one of them never reaches a row, and a
+    dict comprehension over ``facts`` picks the last one without saying so.
+    :func:`.clickops.collect_marketplace` already groups by key and refuses
+    that case at the source, so this loop is not the place that decides it —
+    but it is the place that would silently absorb it if a second producer of
+    facts ever appeared, so the collision is dropped *and declared* here as
+    well rather than resolved by iteration order.
+    """
+    by_key: dict[str, VendorFact] = {}
+    ambiguous: set[str] = set()
+    for candidate in facts:
+        clash = by_key.get(candidate.key)
+        if clash is not None and clash.legal_name != candidate.legal_name:
+            ambiguous.add(candidate.key)
+            refused.append(
+                f"marketplace: ambiguous seller: {clash.legal_name!r} and {candidate.legal_name!r} both "
+                f"reduce to the vendor key {candidate.key!r}, so neither was applied to a row — choosing one "
+                f"would report part of a bill as the whole of it. Reaching this line is a bug in dora-roi: "
+                f"the collector is supposed to have refused the pair already. Please report it."
+            )
+            continue
+        by_key[candidate.key] = candidate
+
+    for row in rows:
+        key = row.source_key or ""
+        if key in ambiguous:
+            continue
+        fact = by_key.get(key)
+        if fact is None:
+            continue
+
+        if row.status_of("legal_name") is not FieldStatus.FILLED:
+            row.legal_name = fact.legal_name
+            row.mark(
+                "legal_name",
+                FieldStatus.FILLED,
+                source=fact.source,
+                note="seller of record on the AWS Marketplace charges for this account",
+            )
+
+        # Grouped by LEGAL_ENTITY_NAME and filtered to the Marketplace billing
+        # entity, this figure is strictly better provenance than the
+        # substring-matched INFERRED estimate `_collect_aws` writes above for
+        # a vendor known only from Terraform — shipping a producer
+        # (`VendorFact.annual_spend`) with no consumer would be worse than not
+        # collecting it at all.
+        if fact.annual_spend is not None and row.status_of("total_annual_expense") is not FieldStatus.FILLED:
+            note = (
+                f"AWS Marketplace charges billed under {fact.legal_name!r}, grouped by LEGAL_ENTITY_NAME "
+                f"and filtered to the Marketplace billing entity."
+            )
+            row.total_annual_expense = fact.annual_spend
+            row.mark("total_annual_expense", FieldStatus.FILLED, source=fact.source, note=note)
+            if fact.currency:
+                row.currency = fact.currency
+                row.mark("currency", FieldStatus.FILLED, source=fact.source, note=note)
 
 
 def _join_supply_chain(roi: RegisterOfInformation) -> None:
@@ -757,9 +1231,35 @@ def _perimeter(sources: _Sources, use_gleif: bool, overlay_file: Path | None = N
     return {
         "state_files": sources.declared,
         "aws": sources.aws,
+        # Whether a `--sources` file's `aws:` block named any accounts to
+        # sweep at all — distinct from `swept_accounts` being empty, which
+        # can also mean a sweep was configured but every account in it was
+        # refused. `methodology.to_markdown` needs both to tell "no channel
+        # beyond Marketplace was ever attempted" apart from "it was attempted
+        # and found nothing".
+        "aws_sweep_configured": sources.aws_sweep is not None,
         "kubernetes": sources.k8s_context or sources.k8s,
         "gleif": use_gleif,
         "overlay": str(overlay_file) if overlay_file else None,
+        # (account_id, [refusal, ...]) — the exact per-account slice recorded
+        # in `_collect_aws`, not reconstructed from `clickops_refused` by
+        # string matching. JSON round-trips a tuple as a two-element array.
+        "swept_accounts": [(account_id, list(refusals)) for account_id, refusals in sources.swept_accounts],
+        # The distinct `resource_types` keys found in one account's own,
+        # unmerged evidence — enough for the methodology note to say a
+        # channel "found something" without shipping raw provider objects
+        # (not JSON-safe: `set`/`Counter` fields) through a structure this
+        # module also feeds straight into `json.dumps`. A list, positionally
+        # aligned with `swept_accounts` above — never a dict keyed by
+        # account_id, which is not unique (R4; see `swept_evidence`'s own
+        # docstring on `_Sources`).
+        "swept_evidence": [list(keys) for keys in sources.swept_evidence],
+        "unreachable_accounts": list(sources.unreachable_accounts),
+        "clickops_refused": list(sources.clickops_refused),
+        "unnamed_principals": [
+            (principal.account_id, principal.role_name, principal.has_external_id)
+            for principal in sources.unnamed_principals
+        ],
     }
 
 
@@ -809,9 +1309,20 @@ def _prefill(roi: RegisterOfInformation, perimeter: dict[str, Any]) -> dict[str,
 
 
 def _row_payload(row: RoIRow) -> dict[str, Any]:
-    """Values and provenance, both keyed by official field code."""
+    """Values and provenance, both keyed by official field code, plus the join key.
+
+    ``source_key`` sits alongside ``values``/``provenance``, not inside either
+    of them: it must never be mistaken for a reportable field (it has no
+    alias and no place in a filing), but a reader of ``roi_prefill.json`` —
+    and, structurally, this same module's own ``_already_settled`` — needs a
+    stable way to match a row back to the provider that produced it. Zipping
+    two independently-ordered lists by position is the alternative this
+    exists to rule out: this codebase already learned that lesson once, in
+    :func:`.overlay.vendors.apply_overlay`.
+    """
     code_of = {name: info.alias for name, info in type(row).model_fields.items() if info.alias is not None}
     return {
+        "source_key": row.source_key,
         "values": row.model_dump(by_alias=True, mode="json"),
         "provenance": {
             code_of[name]: {"status": str(entry.status), "source": entry.source, "note": entry.note}
@@ -847,19 +1358,100 @@ def _print_summary(discovered: list[DiscoveredProvider], summary: Any, output: P
     )
 
 
+#: Console label and one-line explanation for each `refusal_kind()` bucket,
+#: in the order printed. Five buckets, never one: a review found the console
+#: printing everything under a single "Refused" heading called a trust-policy
+#: parse failure and an unreached account "refused" — both AWS said nothing
+#: to, and the very `methodology.md` this same run writes says so in as many
+#: words (R2). Labelling them apart here is what keeps the two surfaces from
+#: contradicting each other on the one claim this whole task exists to keep.
+#:
+#: Each label names its bucket; the note beside it says what the bucket does
+#: and does not distinguish. That division is deliberate — a label is a name
+#: this document assigns, a note is a claim about the world, and only the
+#: second has to survive the code path that fills the bucket.
+_REFUSAL_HEADINGS: dict[str, tuple[str, str]] = {
+    # Not "AWS said no to a specific action": every producer of this shape is
+    # an `except Exception`, so a dead credential and an unreachable endpoint
+    # reach it exactly as an `AccessDenied` does, and three of the five write
+    # the word "denied" into the message before looking at the exception at
+    # all (a review finding, F2). `refusal_kind`'s own docstring enumerates
+    # the five call sites.
+    "denied": (
+        "Refused",
+        "one per-account channel call came back an error; denials, unusable credentials and "
+        "unreachable endpoints are not told apart here — read the exception type in each line",
+    ),
+    "parse_failure": ("Could not parse", "dora-roi's own failure, not an AWS denial"),
+    "not_reached": ("Named but never reached", "no session could be established"),
+    "not_attempted": ("Never attempted", "no account or region was ever known to try"),
+    # `refusal_kind`'s own docstring names exactly why this bucket exists:
+    # Cost Explorer wraps a missing credential, a denied permission and an
+    # unreachable region into one exception, and Marketplace's broadest
+    # catch takes whatever else a client or a connection can do. Folding
+    # either into "Refused" (a review finding, N1) would claim more than
+    # the exception that produced the line distinguishes.
+    "unavailable": ("Unavailable", "credentials, connectivity and denials are not told apart here"),
+    # Nothing failed here: the Marketplace response arrived and named two
+    # sellers reducing to one vendor key, so the fact was withheld rather
+    # than resolved by picking one (finding C1). Filed apart from
+    # "Unavailable" because the call was made and answered.
+    "ambiguous": (
+        "Answered, but not filled",
+        "the call succeeded and its answer did not say which counterparty it belonged to",
+    ),
+}
+
+
+def _print_refusals(refused: list[str]) -> None:
+    """Every refusal, grouped by what it actually means, never truncated.
+
+    A fixed cap falsifies `PERIMETER_WARNING`'s own claim that a refusal in
+    scope "is reported above, by name" the moment a run has more refusals
+    than the cap — the same defect shape C2 was, in the same constant, one
+    round later (R3). This tool already commits to declaring the whole
+    perimeter; a long list is the honest cost of that, not a reason to hide
+    part of it.
+    """
+    if not refused:
+        return
+    buckets: dict[str, list[str]] = {key: [] for key in _REFUSAL_HEADINGS}
+    for line in refused:
+        buckets[refusal_kind(line)].append(line)
+    for kind, (label, note) in _REFUSAL_HEADINGS.items():
+        items = buckets[kind]
+        if not items:
+            continue
+        typer.echo("")
+        typer.echo(f"{label} ({len(items)}) — {note}:")
+        for line in items:
+            typer.echo(f"  - {line}")
+
+
 def _print_perimeter(sources: _Sources, gleif: bool) -> None:
-    """Golden rule 5: say what was scanned, never imply completeness."""
+    """Golden rule 5: say what was scanned, never imply completeness.
+
+    C2: this is the surface every user sees on every run, and `describe()`'s
+    per-account counts alone are not enough on it — a run with a refused
+    channel must not print only "swept N account(s)" and then a categorical
+    warning next to it. The refusals themselves get printed here too, in
+    full and correctly labelled (see `_print_refusals`), not filed away in
+    methodology.md alone.
+    """
     typer.echo("")
     typer.echo("Scanned:")
     for line in sources.describe():
         typer.echo(f"  - {line}")
     typer.echo(f"  - GLEIF enrichment: {'on' if gleif else 'off'}")
+
+    _print_refusals(sources.clickops_refused)
+
     typer.echo("")
     typer.echo(PERIMETER_WARNING)
 
 
 def _fail(error: Exception) -> None:
-    err.print(f"[red]Error:[/red] {error}")
+    err.print(f"[red]Error:[/red] {_plain(error)}")
     raise typer.Exit(EXIT_USER_ERROR) from error
 
 

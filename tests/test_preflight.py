@@ -9,11 +9,13 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
+from dora_roi.collectors.clickops import ExternalPrincipal
 from dora_roi.export.preflight import (
     Finding,
     PreflightError,
     Severity,
     load_prefill,
+    load_unnamed_principals,
     preflight,
     summarise_findings,
 )
@@ -279,6 +281,66 @@ class TestLoadPrefill:
             load_prefill(tmp_path / "nope.json")
 
 
+class TestLoadUnnamedPrincipals:
+    """`_perimeter` (cli.py) already writes these into roi_prefill.json's
+    `perimeter.unnamed_principals`; this is the reader `check`/`export` use."""
+
+    def test_a_prefill_with_no_perimeter_key_at_all_yields_no_principals(self, tmp_path: Path) -> None:
+        """A prefill written before this feature existed has no `perimeter` key.
+        That must read as "none recorded", not as an error."""
+        path = tmp_path / "roi_prefill.json"
+        path.write_text(json.dumps({"templates": {}}))
+        assert load_unnamed_principals(path) == []
+
+    def test_a_perimeter_with_no_unnamed_principals_key_yields_no_principals(self, tmp_path: Path) -> None:
+        path = tmp_path / "roi_prefill.json"
+        path.write_text(json.dumps({"templates": {}, "perimeter": {"state_files": []}}))
+        assert load_unnamed_principals(path) == []
+
+    def test_it_reconstructs_the_recorded_triples(self, tmp_path: Path) -> None:
+        path = tmp_path / "roi_prefill.json"
+        path.write_text(
+            json.dumps(
+                {
+                    "templates": {},
+                    "perimeter": {
+                        "unnamed_principals": [
+                            ["999988887777", "MysteryRole", False],
+                            ["111122223333", "OtherRole", True],
+                        ]
+                    },
+                }
+            )
+        )
+        principals = load_unnamed_principals(path)
+        assert [(p.account_id, p.role_name, p.has_external_id) for p in principals] == [
+            ("999988887777", "MysteryRole", False),
+            ("111122223333", "OtherRole", True),
+        ]
+
+    def test_a_missing_file_is_the_same_actionable_error_as_load_prefill(self, tmp_path: Path) -> None:
+        with pytest.raises(PreflightError, match="nope.json"):
+            load_unnamed_principals(tmp_path / "nope.json")
+
+    def test_a_malformed_entry_is_reported_not_silently_dropped(self, tmp_path: Path) -> None:
+        path = tmp_path / "roi_prefill.json"
+        path.write_text(json.dumps({"templates": {}, "perimeter": {"unnamed_principals": [["only-one-field"]]}}))
+        with pytest.raises(PreflightError, match="unnamed_principals"):
+            load_unnamed_principals(path)
+
+    def test_a_non_object_perimeter_is_rejected(self, tmp_path: Path) -> None:
+        path = tmp_path / "roi_prefill.json"
+        path.write_text(json.dumps({"templates": {}, "perimeter": "not an object"}))
+        with pytest.raises(PreflightError, match="perimeter"):
+            load_unnamed_principals(path)
+
+    def test_a_non_array_unnamed_principals_is_rejected(self, tmp_path: Path) -> None:
+        path = tmp_path / "roi_prefill.json"
+        path.write_text(json.dumps({"templates": {}, "perimeter": {"unnamed_principals": "not a list"}}))
+        with pytest.raises(PreflightError, match="unnamed_principals"):
+            load_unnamed_principals(path)
+
+
 class TestEbaValidationRules:
     """Columns an ACTIVE EBA rule requires, kept separate from our mandatory flags."""
 
@@ -394,3 +456,226 @@ class TestTheSyntheticReferenceExplainsItself:
     def test_it_says_why_the_generated_one_is_refused(self) -> None:
         """Not because inventing is wrong — because ours moves when a provider is renamed."""
         assert "derived from the Terraform provider name" in self.finding().fix
+
+
+class TestUnidentifiedExternalPrincipal:
+    """An outside AWS account that can assume a role here, named by no table."""
+
+    def principal(self, has_external_id: bool = True) -> ExternalPrincipal:
+        return ExternalPrincipal(account_id="999988887777", role_name="MysteryRole", has_external_id=has_external_id)
+
+    def test_an_unnamed_principal_is_flagged(self) -> None:
+        roi = RegisterOfInformation(providers=[ThirdPartyProvider(legal_name="Acme")])
+        found = codes(preflight(roi, unnamed_principals=[self.principal()]))
+        assert "UNIDENTIFIED_EXTERNAL_PRINCIPAL" in found
+
+    def test_it_is_a_warning_not_a_blocker(self) -> None:
+        roi = RegisterOfInformation()
+        finding = next(
+            f
+            for f in preflight(roi, unnamed_principals=[self.principal()])
+            if f.code == "UNIDENTIFIED_EXTERNAL_PRINCIPAL"
+        )
+        assert finding.severity is Severity.WARNING
+
+    def test_with_no_unnamed_principals_there_is_no_finding(self) -> None:
+        """Paired with the positive case above: an empty list must not still warn."""
+        roi = RegisterOfInformation(providers=[ThirdPartyProvider(legal_name="Acme")])
+        assert "UNIDENTIFIED_EXTERNAL_PRINCIPAL" not in codes(preflight(roi))
+        assert "UNIDENTIFIED_EXTERNAL_PRINCIPAL" not in codes(preflight(roi, unnamed_principals=[]))
+
+    def test_the_message_names_the_account_and_the_role(self) -> None:
+        roi = RegisterOfInformation()
+        finding = next(
+            f
+            for f in preflight(roi, unnamed_principals=[self.principal()])
+            if f.code == "UNIDENTIFIED_EXTERNAL_PRINCIPAL"
+        )
+        assert "999988887777" in finding.message
+        assert "MysteryRole" in finding.message
+
+    def test_one_finding_per_unnamed_principal(self) -> None:
+        other = ExternalPrincipal(account_id="111122223333", role_name="OtherRole", has_external_id=True)
+        roi = RegisterOfInformation()
+        findings = [
+            f
+            for f in preflight(roi, unnamed_principals=[self.principal(), other])
+            if f.code == "UNIDENTIFIED_EXTERNAL_PRINCIPAL"
+        ]
+        assert len(findings) == 2
+        assert {f.row_key for f in findings} == {"999988887777:MysteryRole", "111122223333:OtherRole"}
+
+    def test_it_does_not_name_which_of_our_own_accounts_grants_the_access(self) -> None:
+        """ExternalPrincipal carries no such fact; inventing one would be a guess, not a finding."""
+        roi = RegisterOfInformation()
+        finding = next(
+            f
+            for f in preflight(roi, unnamed_principals=[self.principal()])
+            if f.code == "UNIDENTIFIED_EXTERNAL_PRINCIPAL"
+        )
+        assert "production" not in finding.message.lower()
+        assert "production" not in finding.fix.lower()
+
+    def test_a_missing_external_id_condition_is_called_out(self) -> None:
+        roi = RegisterOfInformation()
+        finding = next(
+            f
+            for f in preflight(roi, unnamed_principals=[self.principal(has_external_id=False)])
+            if f.code == "UNIDENTIFIED_EXTERNAL_PRINCIPAL"
+        )
+        assert "externalid" in finding.fix.lower()
+
+    def test_a_present_external_id_condition_is_not_called_out_as_missing(self) -> None:
+        """Paired with the case above: only the absence is worth a sentence."""
+        roi = RegisterOfInformation()
+        finding = next(
+            f
+            for f in preflight(roi, unnamed_principals=[self.principal(has_external_id=True)])
+            if f.code == "UNIDENTIFIED_EXTERNAL_PRINCIPAL"
+        )
+        assert "externalid" not in finding.fix.lower()
+
+
+class TestUnidentifiedPrincipalCarriesTheOrganizationsCaveat:
+    """C7: *outside* is decided by subtracting the accounts AWS Organizations
+    named. When that call was refused there is nothing to subtract, so a
+    sibling account in the filer's own organisation reaches this check exactly
+    as a vendor's would. methodology.md says so; `check` and `export` never
+    open methodology.md, so the message has to carry it."""
+
+    def finding(self) -> Finding:
+        principal = ExternalPrincipal(account_id="999988887777", role_name="MysteryRole", has_external_id=True)
+        return next(
+            f
+            for f in preflight(RegisterOfInformation(), unnamed_principals=[principal])
+            if f.code == "UNIDENTIFIED_EXTERNAL_PRINCIPAL"
+        )
+
+    def test_the_message_says_organizations_may_be_why_it_looks_external(self) -> None:
+        message = self.finding().message.lower()
+        assert "organizations" in message
+        assert "your own organisation" in message
+
+    def test_it_still_states_the_finding_rather_than_only_hedging(self) -> None:
+        """The caveat qualifies the claim; it must not replace it."""
+        message = self.finding().message
+        assert "999988887777" in message
+        assert "standing access" in message
+
+
+class TestWildcardExternalPrincipal:
+    """C2: `Principal: "*"` names no counterparty because it names all of
+    them, which is a different finding from an account no table could name."""
+
+    def wildcard(self, has_external_id: bool = False) -> ExternalPrincipal:
+        return ExternalPrincipal(account_id="*", role_name="PublicRole", has_external_id=has_external_id)
+
+    def finding(self, has_external_id: bool = False) -> Finding:
+        return next(
+            f
+            for f in preflight(RegisterOfInformation(), unnamed_principals=[self.wildcard(has_external_id)])
+            if f.code == "WILDCARD_EXTERNAL_PRINCIPAL"
+        )
+
+    def test_it_gets_its_own_code_not_the_unnamed_one(self) -> None:
+        found = codes(preflight(RegisterOfInformation(), unnamed_principals=[self.wildcard()]))
+        assert "WILDCARD_EXTERNAL_PRINCIPAL" in found
+        assert "UNIDENTIFIED_EXTERNAL_PRINCIPAL" not in found
+
+    def test_a_real_account_still_gets_the_unnamed_code(self) -> None:
+        """The negative half: the branch must not swallow the ordinary case."""
+        principal = ExternalPrincipal(account_id="999988887777", role_name="MysteryRole", has_external_id=False)
+        found = codes(preflight(RegisterOfInformation(), unnamed_principals=[principal]))
+        assert "UNIDENTIFIED_EXTERNAL_PRINCIPAL" in found
+        assert "WILDCARD_EXTERNAL_PRINCIPAL" not in found
+
+    def test_the_message_is_about_the_principal_not_an_unidentified_account(self) -> None:
+        message = self.finding().message
+        assert "PublicRole" in message
+        assert "restricted to no AWS account" in message
+        assert "cannot say whose it is" not in message
+
+    def test_it_does_not_claim_every_account_can_assume_the_role(self) -> None:
+        """`Principal: "*"` with an `aws:PrincipalOrgID` condition is an
+        ordinary, restrictive policy, and this tool reads only
+        `sts:ExternalId` out of `Condition` — so effective access is not a
+        claim it is in a position to make."""
+        finding = self.finding()
+        assert "every AWS account can assume" not in finding.message
+        assert "does not evaluate the statement's conditions" in finding.fix
+        assert "aws:PrincipalOrgID" in finding.fix
+
+    def test_the_fix_is_to_read_the_policy_not_to_look_up_a_vendor(self) -> None:
+        fix = self.finding().fix
+        assert "name the account(s) meant to assume it" in fix
+        assert "account-ID mapping" not in fix
+
+    def test_an_external_id_is_recorded_without_being_treated_as_an_identity(self) -> None:
+        with_id = self.finding(has_external_id=True).fix
+        without_id = self.finding(has_external_id=False).fix
+        assert "shared string rather than an identity" in with_id
+        assert "is absent" in without_id
+
+
+class TestPossibleDuplicateVendor:
+    """Fuzzy matching is refused for merging and used for asking (Task 1's `vendor_key`)."""
+
+    def two_spellings(self) -> RegisterOfInformation:
+        return RegisterOfInformation(
+            providers=[
+                ThirdPartyProvider(legal_name="Datadog"),
+                ThirdPartyProvider(legal_name="Datadog, Inc."),
+            ]
+        )
+
+    def test_two_rows_that_normalise_alike_are_flagged_not_merged(self) -> None:
+        roi = self.two_spellings()
+        findings = [f for f in preflight(roi) if f.code == "POSSIBLE_DUPLICATE_VENDOR"]
+        assert len(findings) == 1
+        assert findings[0].severity is Severity.WARNING
+        assert len(roi.providers) == 2, "the check asks a human; it must never merge"
+
+    def test_the_rows_keep_their_own_legal_names_after_the_check_runs(self) -> None:
+        """Not just the count: the actual values must be untouched, not folded into each other."""
+        roi = self.two_spellings()
+        preflight(roi)
+        assert {p.legal_name for p in roi.providers} == {"Datadog", "Datadog, Inc."}
+
+    def test_distinct_vendor_names_are_not_flagged(self) -> None:
+        """Paired with the positive case: two genuinely different vendors must stay quiet."""
+        roi = RegisterOfInformation(
+            providers=[
+                ThirdPartyProvider(legal_name="Datadog"),
+                ThirdPartyProvider(legal_name="Snyk"),
+            ]
+        )
+        assert "POSSIBLE_DUPLICATE_VENDOR" not in codes(preflight(roi))
+
+    def test_rows_with_no_legal_name_are_never_treated_as_duplicates_of_each_other(self) -> None:
+        roi = RegisterOfInformation(providers=[ThirdPartyProvider(), ThirdPartyProvider(legal_name="")])
+        assert "POSSIBLE_DUPLICATE_VENDOR" not in codes(preflight(roi))
+
+    def test_the_message_names_both_rows(self) -> None:
+        finding = next(f for f in preflight(self.two_spellings()) if f.code == "POSSIBLE_DUPLICATE_VENDOR")
+        assert "Datadog" in finding.message
+        assert "Datadog, Inc." in finding.message
+
+    def test_the_fix_tells_the_reader_to_pick_one_and_says_why_the_tool_will_not(self) -> None:
+        finding = next(f for f in preflight(self.two_spellings()) if f.code == "POSSIBLE_DUPLICATE_VENDOR")
+        fix = finding.fix.lower()
+        assert "counterparty" in fix
+        assert "merge" in fix
+
+    def test_a_group_of_three_produces_one_finding_naming_all_three(self) -> None:
+        roi = RegisterOfInformation(
+            providers=[
+                ThirdPartyProvider(legal_name="Snyk"),
+                ThirdPartyProvider(legal_name="Snyk, Inc."),
+                ThirdPartyProvider(legal_name="Snyk Ltd"),
+            ]
+        )
+        findings = [f for f in preflight(roi) if f.code == "POSSIBLE_DUPLICATE_VENDOR"]
+        assert len(findings) == 1
+        for name in ("Snyk", "Snyk, Inc.", "Snyk Ltd"):
+            assert name in findings[0].message
+        assert len(roi.providers) == 3

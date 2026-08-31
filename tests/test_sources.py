@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import boto3
 import pytest
 from moto import mock_aws
 
-from dora_roi.collectors.sources import SourceError, StateSource, fetch_sources, load_sources
+from dora_roi.collectors.sources import SourceError, StateSource, fetch_sources, load_aws_sweep, load_sources
 from dora_roi.collectors.tfstate import TfstateError, parse_many
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -108,6 +109,45 @@ class TestLoadSources:
         path.write_text("- s3://b/k\n")
         with pytest.raises(SourceError, match="states"):
             load_sources(path)
+
+    def test_an_aws_only_file_is_valid_and_names_no_state(self, tmp_path: Path) -> None:
+        """C6: the flagship no-IaC case — several accounts, no Terraform
+        anywhere — used to raise `must be a mapping with a 'states:' list`
+        unless the user knew to add a dummy `states: []`."""
+        path = tmp_path / "s.yaml"
+        path.write_text("aws:\n  profile: management\n  assume_role_name: DoraRoiReadOnly\n")
+
+        assert load_sources(path) == []
+
+    def test_an_aws_only_file_still_carries_its_sweep(self, tmp_path: Path) -> None:
+        """The other half of the same file: accepting it is only useful if the
+        `aws:` block it exists for survives the read."""
+        path = tmp_path / "s.yaml"
+        path.write_text("aws:\n  profile: management\n  assume_role_name: DoraRoiReadOnly\n")
+
+        sweep = load_aws_sweep(path)
+        assert sweep is not None
+        assert sweep.profile == "management"
+        assert sweep.assume_role_name == "DoraRoiReadOnly"
+
+    def test_a_file_with_neither_key_is_still_refused(self, tmp_path: Path) -> None:
+        """The negative half: a mapping that configures nothing must not read
+        as "scan nothing, successfully"."""
+        path = tmp_path / "s.yaml"
+        path.write_text("profile: management\n")
+
+        with pytest.raises(SourceError, match="states"):
+            load_sources(path)
+
+    def test_the_error_does_not_point_at_a_command_that_does_not_exist(self, tmp_path: Path) -> None:
+        """It used to end "See `dora-roi sources init`" — there is no such
+        command, in this CLI or any other."""
+        path = tmp_path / "s.yaml"
+        path.write_text("profile: management\n")
+
+        with pytest.raises(SourceError) as caught:
+            load_sources(path)
+        assert "sources init" not in str(caught.value)
 
     def test_missing_file(self, tmp_path: Path) -> None:
         with pytest.raises(SourceError, match="nope.yaml"):
@@ -327,3 +367,128 @@ class TestWorkspaces:
 
     def test_the_source_says_which_workspace_it_is(self) -> None:
         assert "workspace production" in str(StateSource(uri="s3://b/", workspace="production"))
+
+
+class TestAwsSweep:
+    def _write(self, tmp_path: Path, body: str) -> Path:
+        path = tmp_path / "sources.yaml"
+        path.write_text(body, encoding="utf-8")
+        return path
+
+    def test_no_aws_block_is_not_an_error(self, tmp_path: Path) -> None:
+        assert load_aws_sweep(self._write(tmp_path, "states:\n  - a.tfstate\n")) is None
+
+    def test_an_explicit_account_list_keeps_its_credentials(self, tmp_path: Path) -> None:
+        sweep = load_aws_sweep(
+            self._write(
+                tmp_path,
+                "aws:\n"
+                "  profile: management\n"
+                "  accounts:\n"
+                '    - id: "111122223333"\n'
+                "      role_arn: arn:aws:iam::111122223333:role/DoraRoiReadOnly\n"
+                "    - profile: staging\n",
+            )
+        )
+        assert sweep is not None
+        assert sweep.profile == "management"
+        assert sweep.accounts[0].role_arn == "arn:aws:iam::111122223333:role/DoraRoiReadOnly"
+        assert sweep.accounts[1].profile == "staging"
+
+    def test_the_assume_role_shortcut_is_read(self, tmp_path: Path) -> None:
+        sweep = load_aws_sweep(self._write(tmp_path, "aws:\n  assume_role_name: DoraRoiReadOnly\n"))
+        assert sweep is not None
+        assert sweep.assume_role_name == "DoraRoiReadOnly"
+
+    def test_a_typo_names_the_key_it_did_not_recognise(self, tmp_path: Path) -> None:
+        """Silently ignoring an unknown key is how a scan reads less than you asked."""
+        with pytest.raises(SourceError, match="assume_role_nmae"):
+            load_aws_sweep(self._write(tmp_path, "aws:\n  assume_role_nmae: X\n"))
+
+    def test_an_account_with_neither_profile_nor_role_is_refused(self, tmp_path: Path) -> None:
+        with pytest.raises(SourceError, match="profile.*role_arn"):
+            load_aws_sweep(self._write(tmp_path, 'aws:\n  accounts:\n    - id: "111122223333"\n'))
+
+    def test_an_aws_block_that_is_all_comments_is_not_a_sweep(self, tmp_path: Path) -> None:
+        """`aws:` with everything commented out parses as None, not as a dict."""
+        assert load_aws_sweep(self._write(tmp_path, "aws:\n  # profile: management\n")) is None
+
+    def test_a_scalar_accounts_value_is_refused_not_iterated(self, tmp_path: Path) -> None:
+        """`accounts: 5` is truthy and non-iterable — `for entry in 5` must not reach Python."""
+        with pytest.raises(SourceError, match="aws.accounts.*must be a list"):
+            load_aws_sweep(self._write(tmp_path, "aws:\n  accounts: 5\n"))
+
+    def test_a_non_mapping_account_entry_is_refused(self, tmp_path: Path) -> None:
+        with pytest.raises(SourceError, match="entry 1 must be a mapping"):
+            load_aws_sweep(self._write(tmp_path, "aws:\n  accounts:\n    - not-a-mapping\n"))
+
+    def test_an_unknown_key_inside_one_account_names_that_account(self, tmp_path: Path) -> None:
+        """Five accounts, a typo on the third: the error has to say which one."""
+        sweep_yaml = (
+            "aws:\n"
+            "  accounts:\n"
+            '    - id: "1"\n'
+            "      profile: a\n"
+            '    - id: "2"\n'
+            "      role_arnn: arn:aws:iam::2:role/ro\n"
+        )
+        with pytest.raises(SourceError, match=r"entry 2 \(id 2\)") as excinfo:
+            load_aws_sweep(self._write(tmp_path, sweep_yaml))
+        assert "role_arnn" in str(excinfo.value)
+
+    def test_an_account_id_survives_as_a_string_not_an_int(self, tmp_path: Path) -> None:
+        """An unquoted 12-digit id parses as `int` in YAML; it must not leak past the loader."""
+        sweep = load_aws_sweep(self._write(tmp_path, "aws:\n  accounts:\n    - id: 111122223333\n      profile: p\n"))
+        assert sweep is not None
+        assert sweep.accounts[0].id == "111122223333"
+        assert isinstance(sweep.accounts[0].id, str)
+
+
+class TestTheReadmesAwsBlockIsReal:
+    """C6: the `aws:` block shipped undocumented, and the flagship no-IaC case
+    could not be configured naively. Documenting it is only half a fix if the
+    document drifts — so the README's own YAML is parsed by the same loader a
+    user's file goes through, the way `tests/test_iam_policy.py` already does
+    for the README's IAM policy.
+    """
+
+    README = Path(__file__).parent.parent / "README.md"
+
+    #: Anchored to the passage that documents the block, not to "every ```yaml```
+    #: block with an `aws:` key in it": the provider-mapping example further
+    #: down happens to override a provider named `aws`, and a looser search
+    #: swept it up and failed on a key that is not a sweep key at all.
+    START = "**No Terraform at all?**"
+    END = "Look before you leap"
+
+    def _blocks(self) -> list[str]:
+        text = self.README.read_text(encoding="utf-8")
+        assert self.START in text and self.END in text, (
+            f"README.md no longer has the passage between {self.START!r} and {self.END!r} — "
+            "was the `aws:` sources block moved or renamed?"
+        )
+        section = text.split(self.START, 1)[1].split(self.END, 1)[0]
+        blocks = re.findall(r"```yaml\n(.*?)```", section, re.DOTALL)
+        assert blocks, "the `aws:` sources passage in README.md no longer shows a YAML example"
+        return blocks
+
+    def test_every_documented_aws_block_loads(self, tmp_path: Path) -> None:
+        for index, block in enumerate(self._blocks()):
+            path = tmp_path / f"readme-{index}.yaml"
+            path.write_text(block, encoding="utf-8")
+            assert load_sources(path) == [], f"README block {index} should name no state file"
+            assert load_aws_sweep(path) is not None, f"README block {index} produced no sweep"
+
+    def test_the_documented_shortcut_and_the_documented_accounts_both_arrive(self, tmp_path: Path) -> None:
+        """Not just "it parses": the values a reader would copy have to reach
+        the sweep, or the example teaches a syntax that quietly does nothing."""
+        sweeps = []
+        for index, block in enumerate(self._blocks()):
+            path = tmp_path / f"readme-{index}.yaml"
+            path.write_text(block, encoding="utf-8")
+            sweeps.append(load_aws_sweep(path))
+
+        assert any(s is not None and s.assume_role_name for s in sweeps), "no README block shows assume_role_name"
+        explicit = [s for s in sweeps if s is not None and s.accounts]
+        assert explicit, "no README block shows an explicit accounts list"
+        assert all(account.profile or account.role_arn for s in explicit for account in s.accounts)

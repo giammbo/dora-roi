@@ -16,6 +16,14 @@ List, Describe, Get or Search *before it reaches the network*. Writing
 `put_object` here does not fail in review or in production — it fails at the
 call. Objects are copied to a scratch directory and parsed from there.
 
+One declared exception: `_s3_client` calls `sts:AssumeRole` directly when a
+source names a `role_arn`, and that call does not go through `readonly` — it
+is not itself a read. It is defensible on the same grounds
+:mod:`.clickops`'s identical exception documents for its own sweep: assuming
+a role changes nothing in the target account, and every call made *through*
+the session it returns still goes through `readonly` exactly like every
+other credential this tool uses.
+
 Nothing touches the DynamoDB lock table either, so a scan never takes a
 Terraform lock and can never block an apply that is running beside it.
 """
@@ -33,7 +41,17 @@ import yaml
 from dora_roi.collectors.aws import readonly
 from dora_roi.collectors.tfstate import STATE_SUFFIXES, TfstateError, resolve_state_paths
 
-__all__ = ["WORKSPACE_PREFIX", "SourceError", "StateSource", "fetch_sources", "load_sources", "workspace_of"]
+__all__ = [
+    "WORKSPACE_PREFIX",
+    "AwsAccount",
+    "AwsSweep",
+    "SourceError",
+    "StateSource",
+    "fetch_sources",
+    "load_aws_sweep",
+    "load_sources",
+    "workspace_of",
+]
 
 _S3_URI = re.compile(r"^s3://(?P<bucket>[^/]+)/(?P<key>.*)$")
 
@@ -76,8 +94,42 @@ class StateSource:
         return where
 
 
-def load_sources(path: str | Path) -> list[StateSource]:
-    """Read a sources YAML: a list of URIs, each with optional credentials."""
+@dataclass(frozen=True)
+class AwsAccount:
+    """One account to sweep, and how to get into it."""
+
+    id: str | None = None
+    profile: str | None = None
+    role_arn: str | None = None
+
+
+@dataclass(frozen=True)
+class AwsSweep:
+    """Which accounts the vendor channels read, and with whose credentials.
+
+    ``accounts`` is the explicit form and says exactly what will be read.
+    ``assume_role_name`` is the shortcut for an organisation too large to list
+    by hand: the role is tried in every account Organizations reports. The
+    shortcut is only honest because a role that is missing in seven accounts
+    out of twenty is recorded as refused rather than skipped in silence.
+    """
+
+    profile: str | None = None
+    accounts: tuple[AwsAccount, ...] = ()
+    assume_role_name: str | None = None
+
+
+_SWEEP_KEYS = frozenset({"profile", "accounts", "assume_role_name"})
+_ACCOUNT_KEYS = frozenset({"id", "profile", "role_arn"})
+
+
+def _document(path: str | Path) -> Any:
+    """Read a sources YAML file and parse it. Every failure becomes a `SourceError`.
+
+    Shared by :func:`load_sources` and :func:`load_aws_sweep`: they read the same
+    file, and reading it two different ways would give two different error
+    messages for one problem.
+    """
     path = Path(path)
     try:
         raw = path.read_text(encoding="utf-8")
@@ -87,14 +139,37 @@ def load_sources(path: str | Path) -> list[StateSource]:
         raise SourceError(f"could not read {path}: {e}") from e
 
     try:
-        document = yaml.safe_load(raw)
+        return yaml.safe_load(raw)
     except yaml.YAMLError as e:
         raise SourceError(f"{path} is not valid YAML: {e}") from e
 
+
+def load_sources(path: str | Path) -> list[StateSource]:
+    """Read a sources YAML: a list of URIs, each with optional credentials.
+
+    A file carrying only an ``aws:`` block and no ``states:`` key at all is
+    valid and yields no state sources — that is the whole point of the
+    no-Terraform case the ``aws:`` block exists for. It used to raise, so the
+    scenario this branch was built for ("several AWS accounts, no IaC
+    anywhere") could only be configured by someone who already knew to add a
+    dummy ``states: []`` line, which the tests did and no document mentioned
+    (finding C6).
+
+    A file with neither key is still an error: it configures nothing, and
+    silently scanning nothing is the failure mode this tool exists to avoid.
+    """
+    document = _document(path)
+
     if document is None:
         return []
-    if not isinstance(document, dict) or "states" not in document:
-        raise SourceError(f"{path} must be a mapping with a `states:` list. See `dora-roi sources init`.")
+    if not isinstance(document, dict) or not ({"states", "aws"} & set(document)):
+        raise SourceError(
+            f"{path} must be a mapping with a `states:` list, an `aws:` block, or both. `states:` takes "
+            f"paths or s3:// URIs to Terraform state; `aws:` names the accounts to sweep for vendors that "
+            f"appear in no state at all. See the README for an example of each."
+        )
+    if "states" not in document:
+        return []
 
     entries = document["states"]
     if not isinstance(entries, list):
@@ -119,6 +194,56 @@ def load_sources(path: str | Path) -> list[StateSource]:
             )
         )
     return sources
+
+
+def load_aws_sweep(path: str | Path) -> AwsSweep | None:
+    """Read the ``aws:`` block of a sources YAML, if it has one."""
+    document = _document(path)
+    block = document.get("aws") if isinstance(document, dict) else None
+    if not isinstance(block, dict):
+        # `aws:` with everything commented out parses as None, and an absent
+        # block and an empty one mean the same thing: no sweep.
+        return None
+
+    unknown = set(block) - _SWEEP_KEYS
+    if unknown:
+        raise SourceError(f"unknown key(s) under `aws:` in {path}: {', '.join(sorted(unknown))}")
+
+    raw_accounts = block.get("accounts")
+    if raw_accounts is None:
+        raw_accounts = []
+    elif not isinstance(raw_accounts, list):
+        raise SourceError(f"{path}: `aws.accounts` must be a list, got {type(raw_accounts).__name__}.")
+
+    accounts: list[AwsAccount] = []
+    for position, entry in enumerate(raw_accounts, start=1):
+        if not isinstance(entry, dict):
+            raise SourceError(f"{path}: aws.accounts entry {position} must be a mapping, got {entry!r}.")
+        strange = set(entry) - _ACCOUNT_KEYS
+        if strange:
+            raise SourceError(
+                f"{path}: aws.accounts entry {position} (id {entry.get('id', '?')}) has unknown key(s) "
+                f"{', '.join(sorted(strange))}."
+            )
+        if not entry.get("profile") and not entry.get("role_arn"):
+            raise SourceError(
+                f"account {entry.get('id', '?')} in {path} has neither `profile` nor `role_arn`: "
+                f"dora-roi will not guess which credentials to read an account with."
+            )
+        raw_id = entry.get("id")
+        accounts.append(
+            AwsAccount(
+                id=str(raw_id) if raw_id is not None else None,
+                profile=entry.get("profile"),
+                role_arn=entry.get("role_arn"),
+            )
+        )
+
+    return AwsSweep(
+        profile=block.get("profile"),
+        accounts=tuple(accounts),
+        assume_role_name=block.get("assume_role_name"),
+    )
 
 
 def fetch_sources(

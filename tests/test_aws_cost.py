@@ -53,6 +53,47 @@ class TestCollectAnnualExpense:
         assert report.by_service["Amazon S3"] == Decimal("300.25")
         assert report.total == Decimal("1500.75")
 
+    def test_a_second_page_of_services_is_not_dropped(self, stubbed) -> None:
+        """C4: this call groups twelve months by SERVICE, so it produces more
+        groups than the Marketplace call that already paginated — and its
+        figure is what `cli` marks FILLED for the `aws` row. A truncated page
+        makes a service's spend vanish exactly as though it were never
+        billed."""
+        client, stubber = stubbed
+        page1 = ce_response({"Amazon S3": "300.25"})
+        page1["NextPageToken"] = "page-2"
+        stubber.add_response("get_cost_and_usage", page1)
+        stubber.add_response(
+            "get_cost_and_usage",
+            ce_response({"Amazon Relational Database Service": "900.00"}),
+            {
+                "TimePeriod": {"Start": "2025-08-01", "End": "2026-08-01"},
+                "Granularity": "MONTHLY",
+                "Metrics": ["UnblendedCost"],
+                "GroupBy": [{"Type": "DIMENSION", "Key": "SERVICE"}],
+                "NextPageToken": "page-2",
+            },
+        )
+        stubber.activate()
+
+        report = collect_annual_expense(client=client, today=date(2026, 8, 22))
+
+        assert report.by_service["Amazon Relational Database Service"] == Decimal("900.00")
+        assert report.total == Decimal("1200.25")
+        stubber.assert_no_pending_responses()
+
+    def test_a_single_page_makes_exactly_one_call(self, stubbed) -> None:
+        """The negative half: no token means no second request, so the loop
+        cannot turn one bill into two."""
+        client, stubber = stubbed
+        stubber.add_response("get_cost_and_usage", ce_response({"Amazon S3": "300.25"}))
+        stubber.activate()
+
+        report = collect_annual_expense(client=client, today=date(2026, 8, 22))
+
+        assert report.total == Decimal("300.25")
+        stubber.assert_no_pending_responses()
+
     def test_asks_for_exactly_twelve_trailing_months(self, stubbed) -> None:
         client, stubber = stubbed
         stubber.add_response(
@@ -202,3 +243,43 @@ class TestTaxIsNotAService:
         report = collect_annual_expense(client=client, today=date(2026, 8, 22))
         assert expense_for_provider("aws", report) == Decimal("150.00")
         assert expense_for_provider("datadog", report) == Decimal("50.00")
+
+
+class _BuggyClient:
+    """Stands in for a client whose call raises something no botocore
+    exception hierarchy covers — the shape a real bug in this module's own
+    code would take, not a shape AWS ever sends over the wire."""
+
+    def get_cost_and_usage(self, **kwargs: object) -> dict:
+        raise ValueError("something nobody anticipated")
+
+
+class TestCollectAnnualExpenseDegradesRatherThanCrashes:
+    """`collect_annual_expense` used to call `readonly()` with no guard of its
+    own, so a bare botocore exception (no credentials, a denied permission)
+    reached the caller raw and crashed the whole scan instead of degrading to
+    a warning. Narrowed to botocore's own exception hierarchy so a genuine bug
+    in this function still surfaces as itself."""
+
+    def test_a_bad_profile_raises_awserror_not_a_bare_profilenotfound(self) -> None:
+        """boto3 raises `ProfileNotFound` from the Session constructor, before
+        any network call — real code, no Stubber, the same shape as
+        `collect_marketplace`'s identical test for the identical hazard."""
+        with pytest.raises(AwsError):
+            collect_annual_expense(profile="dora-roi-test-profile-that-does-not-exist")
+
+    def test_a_denied_call_raises_awserror(self, stubbed) -> None:
+        client, stubber = stubbed
+        stubber.add_client_error("get_cost_and_usage", service_error_code="AccessDeniedException")
+        stubber.activate()
+        with pytest.raises(AwsError):
+            collect_annual_expense(client=client)
+
+    def test_a_non_botocore_exception_is_not_disguised_as_cost_explorer_unavailable(self) -> None:
+        """A real bug in this function's own code path — or a client shaped
+        nothing like a botocore one — must surface as itself. Reporting it as
+        `AwsError("Cost Explorer unavailable")` would bypass the CLI's own
+        "this is a bug" path, exactly the failure mode a too-broad catch here
+        would reintroduce."""
+        with pytest.raises(ValueError, match="something nobody anticipated"):
+            collect_annual_expense(client=_BuggyClient())  # type: ignore[arg-type]

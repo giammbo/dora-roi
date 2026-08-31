@@ -26,6 +26,8 @@ from typing import Any, Self
 
 import httpx
 
+from dora_roi.naming import significant_words as _significant
+
 __all__ = ["GleifClient", "GleifError", "LeiRecord", "MatchType"]
 
 GLEIF_BASE_URL = "https://api.gleif.org/api/v1"
@@ -35,48 +37,12 @@ MIN_INTERVAL_SECONDS = 1.0
 #: Punctuation that separates a name from its legal form without changing it.
 _NOISE = re.compile(r"[.,\-\u2019']")
 
-#: Legal forms. Stripped before deciding whether two names have anything in
-#: common, because they are the one token every company shares. Left in, GLEIF's
-#: answer to "Auth0, Inc." is "INC Group Inc." — and to "Netlify, Inc." and
-#: "Webflow, Inc." it is the *same* Canadian company, which is how one register
-#: ended up giving three vendors one LEI.
-_LEGAL_FORMS = frozenset(
-    {
-        "inc",
-        "incorporated",
-        "ltd",
-        "limited",
-        "llc",
-        "lp",
-        "llp",
-        "plc",
-        "corp",
-        "corporation",
-        "co",
-        "company",
-        "gmbh",
-        "ag",
-        "sa",
-        "sas",
-        "sarl",
-        "srl",
-        "spa",
-        "bv",
-        "nv",
-        "ab",
-        "as",
-        "oy",
-        "aps",
-        "kft",
-        "sp",
-        "zoo",
-        "pty",
-        "group",
-        "holding",
-        "holdings",
-        "international",
-    }
-)
+# The set of legal forms — stripped before deciding whether two names have
+# anything in common, because they are the one token every company shares —
+# now lives in `dora_roi.naming`, shared with the billing-name matcher. Left
+# in, GLEIF's answer to "Auth0, Inc." is "INC Group Inc." — and to "Netlify,
+# Inc." and "Webflow, Inc." it is the *same* Canadian company, which is how
+# one register ended up giving three vendors one LEI.
 
 
 class GleifError(Exception):
@@ -293,10 +259,6 @@ def _same_name(found: str, queried: str) -> bool:
 def _shares_a_word(found: str, queried: str) -> bool:
     """Whether two names have anything in common beyond being companies."""
     return bool(_significant(found) & _significant(queried))
-
-
-def _significant(name: str) -> set[str]:
-    return {word for word in _normalise(name).split() if word not in _LEGAL_FORMS}
 
 
 def _normalise(name: str) -> str:

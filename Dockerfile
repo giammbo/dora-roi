@@ -25,12 +25,19 @@ WORKDIR /app
 # ---------------------------------------------------------------------------
 FROM python-uv AS base
 
+# The `aws` and `k8s` extras ship with the image, unlike a `uv tool install`
+# where they are opt-in. A pip install can be as small as the user's needs;
+# an image whose whole purpose is `docker compose run dora-roi scan --aws`
+# cannot be, and shipping without them meant every AWS path — reading state
+# from S3 included — died on an ImportError the test image never saw, because
+# every check runs in `dev`, which has them.
+
 # Two syncs, not one. The first installs ONLY the dependencies and stays
 # cached until uv.lock changes; --no-install-project is required because the
 # package cannot be built yet, src/ not being copied. The second, after the
 # COPY, installs the package and with it the `dora-roi` console script.
 COPY pyproject.toml uv.lock ./
-RUN uv sync --frozen --no-install-project
+RUN uv sync --frozen --no-install-project --extra aws --extra k8s
 
 # README.md and LICENSE are both declared in pyproject.toml (`readme` and
 # `license-files`), so the second sync — the one that actually builds the
@@ -38,7 +45,7 @@ RUN uv sync --frozen --no-install-project
 # editing the README does not reinstall every dependency.
 COPY README.md LICENSE ./
 COPY src/ ./src/
-RUN uv sync --frozen
+RUN uv sync --frozen --extra aws --extra k8s
 
 ENTRYPOINT ["dora-roi"]
 CMD ["--help"]

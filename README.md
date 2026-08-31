@@ -78,6 +78,48 @@ URI it came from, not the temporary path it landed in.
 A provider found in several states is one provider with the weight of all of them,
 and the report names every file it read — never the directory it found them in.
 
+**No Terraform at all?** The same file takes an `aws:` block, which is what points the
+vendor-discovery channels at your accounts. It is independent of `states:` — either key
+on its own is a valid file — and an `aws:` block alone is the case a tool that reads
+only Terraform cannot serve at all:
+
+```yaml
+# sources.yaml — no state files anywhere; sweep the whole organisation
+aws:
+  profile: management           # base credentials the sweep assumes each member-account
+                                # role from; omit to use the default. Organizations, Cost
+                                # Explorer and Marketplace are not read with this profile —
+                                # they use the one `--aws-profile` names, so pass
+                                # `--aws-profile management` to aim them at the payer too
+  assume_role_name: DoraRoiReadOnly   # tried in every account Organizations lists
+```
+
+```bash
+dora-roi scan --sources sources.yaml --aws --aws-profile management -o out/   # --aws turns the block on
+```
+
+`assume_role_name` is the shortcut for an organisation too large to list by hand: the
+role is assumed in every account AWS Organizations reports, and an account where it is
+missing is named in the methodology note as one that was never reached, rather than
+skipped in silence. Name the accounts instead when you want to say exactly what will be
+read — explicit always wins over the shortcut, and each account brings its own
+credentials:
+
+```yaml
+aws:
+  accounts:
+    - id: "111122223333"
+      profile: prod
+    - id: "222233334444"
+      role_arn: arn:aws:iam::222233334444:role/DoraRoiReadOnly
+```
+
+Every key is optional except that each account needs a `profile` or a `role_arn` —
+dora-roi will not guess which credentials to read an account with. EventBridge is
+regional, so it is swept only in regions an AWS resource in the perimeter already
+named; on a scan with no state files that set is empty, and the methodology note
+says the channel was never attempted rather than letting it read as empty.
+
 Look before you leap:
 
 ```bash
@@ -142,9 +184,23 @@ Read this part before the rest.
 - **It does not make you compliant, and it never will claim to.** It produces
   hypotheses and a gap analysis. That is the whole product.
 - **It does not file anything.** No submission portal, no regulator integration.
-- **It cannot see shadow IT.** Anything outside your IaC and cloud APIs — click-ops
-  resources, a SaaS someone expensed, a contract with no infrastructure footprint — is
-  invisible. Every command prints this, and the reports state exactly what was scanned.
+- **The blind spot does not shrink — only how much of the visible estate this tool can
+  read does.** Four channels now look for vendors with no Terraform footprint at all: AWS
+  Marketplace billing, federated identity providers, cross-account trust relationships,
+  and EventBridge partner event sources — the last three only inside accounts a
+  `--sources` file names to sweep. A vendor that touches none of those four — paid on a
+  personal or company card, no billing line, no IAM trust, no event integration — is
+  exactly as invisible as it always was, and now sits next to vendors the tool *can* see,
+  which makes the gap easier to miss, not smaller. Every command prints exactly what was
+  scanned, and the methodology note states, per channel and per account, which of those
+  happened: read, read and found nothing, refused, never attempted, or — for a refusal
+  it cannot attribute to a channel — *unconfirmed*, which withdraws that account's other
+  clean claims instead of leaving them standing. An empty result and a refusal are
+  opposite claims, and the per-account lines are rendered to keep them apart; where the
+  tool cannot tell which it had, it says that rather than picking one. One line is not
+  there yet: the note's *AWS Organizations and Cost Explorer* entry reads *read* even on a
+  run where the Organizations call was refused — that refusal reaches the terminal only,
+  and the note names it as its own blind spot rather than implying it has none.
 - **It does not classify your services for you.** The S01–S19 code a provider gets is
   your regulatory responsibility. The packaged mapping suggests; you decide.
 - **It does not know your contracts.** Reference numbers, dates, notice periods,
@@ -160,6 +216,13 @@ Read this part before the rest.
 
   There are tests for all of it, including one that snapshots every object in a bucket,
   runs a full fetch, and asserts the bucket is byte-identical afterwards.
+
+  Two narrow, declared exceptions: fetching state from S3 with a `role_arn`, and sweeping
+  an account for vendor-discovery evidence with one, both call `sts:AssumeRole` to get
+  there. Neither goes through the guard above, and neither is a read. Both are defensible
+  on the same reasoning: assuming a role changes nothing in the target account, and every
+  call made *through* the session it returns still goes through the guard exactly like
+  every other credential this tool uses.
 
 ## Your DNS zone is a confession
 
@@ -224,8 +287,9 @@ can make.** There is an issue template for exactly that.
 
 ## What dora-roi is allowed to do to your AWS account
 
-Nothing. Grant exactly this and no more — every action is a read, and the code
-refuses to issue anything else before the call leaves the process:
+Nothing, beyond one declared exception. Grant exactly this and no more — every
+action but `sts:AssumeRole` is a read, and the code refuses to issue anything
+else before the call leaves the process:
 
 ```json
 {
@@ -233,21 +297,21 @@ refuses to issue anything else before the call leaves the process:
   "Statement": [{
     "Effect": "Allow",
     "Action": [
+      "ce:GetCostAndUsage",
+      "events:ListEventSources",
+      "iam:GetOpenIDConnectProvider",
+      "iam:GetSAMLProvider",
+      "iam:ListOpenIDConnectProviders",
+      "iam:ListRoles",
+      "iam:ListSAMLProviders",
       "organizations:DescribeOrganization",
-      "organizations:ListRoots",
-      "organizations:ListAccounts",
       "organizations:ListAccountsForParent",
       "organizations:ListOrganizationalUnitsForParent",
+      "organizations:ListRoots",
       "s3:GetObject",
       "s3:ListBucket",
-      "ce:GetCostAndUsage",
-      "ce:GetTags",
-      "tag:GetResources",
-      "tag:GetTagKeys",
-      "resource-explorer-2:Search",
-      "resource-explorer-2:ListViews",
-      "iam:ListRoles",
-      "iam:ListUsers"
+      "sts:AssumeRole",
+      "sts:GetCallerIdentity"
     ],
     "Resource": "*"
   }]
@@ -256,10 +320,30 @@ refuses to issue anything else before the call leaves the process:
 
 Scope the two `s3:` actions to your state buckets and nothing wider. Drop them entirely if you never point `--sources` at S3.
 
-The guarantee is not a promise in a document. Every AWS call goes through a
-wrapper that rejects any operation which is not a `List*`, `Describe*`, `Get*` or
-`Search*`, and there is a test asserting that `create_account` raises rather than
-executes.
+`sts:AssumeRole` is needed only for the `assume_role_name` multi-account sweep
+shortcut and the S3 `role_arn` option, both described above — list every account
+with its own `profile` instead of relying on the shortcut and you can drop it
+from the policy too.
+
+This list shrank as well as grew. Seven actions the previous policy granted are
+gone because no line of code ever called them: `ce:GetTags`, `tag:GetResources`,
+`tag:GetTagKeys`, `resource-explorer-2:Search`, `resource-explorer-2:ListViews`,
+`iam:ListUsers`, and `organizations:ListAccounts` (a different, broader
+Organizations call than the one the account walker actually makes,
+`ListAccountsForParent`, from the root down). `sts:GetCallerIdentity`,
+`iam:ListSAMLProviders`, `iam:GetSAMLProvider`, `iam:ListOpenIDConnectProviders`,
+`iam:GetOpenIDConnectProvider` and `events:ListEventSources` are new: the first
+labels which account a Cost Explorer figure was billed to, the rest back the
+identity-provider, trust-relationship and EventBridge-partner channels described
+under "What it does **not** do" above. A test
+(`tests/test_iam_policy.py`) parses this JSON block and asserts its action set
+equals `dora_roi.collectors.aws.REQUIRED_IAM_ACTIONS` exactly, so the two
+cannot drift apart again the way they already had.
+
+The guarantee is not a promise in a document. Every AWS call but the declared
+`sts:AssumeRole` exception goes through a wrapper that rejects any operation
+which is not a `List*`, `Describe*`, `Get*` or `Search*`, and there is a test
+asserting that `create_account` raises rather than executes.
 
 ## More sources, and the things only you know
 
