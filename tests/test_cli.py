@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from unittest import mock
 
 import pytest
 from typer.testing import CliRunner
 
 from dora_roi import cli as cli_module
 from dora_roi.cli import app
+from dora_roi.collectors.sources import SourceError
 from dora_roi.enrichment.gleif import GleifError, LeiRecord, MatchType
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -2239,3 +2241,32 @@ class TestCostExplorerScope:
         self._patch(monkeypatch, calling="111122223333")
         result = runner.invoke(app, ["scan", "-s", SAMPLE, "-o", str(tmp_path), "--aws"])
         assert "not the organisation's payer" not in result.output
+
+
+class TestErrorTextSurvivesRich:
+    """Rich eats `[...]` as a style tag. The one message users hit says
+    `dora-roi[aws]`, and losing the bracket turns it into the command that
+    put them there."""
+
+    def test_the_aws_extra_survives_in_an_error(self, tmp_path: Path) -> None:
+        sources = tmp_path / "sources.yaml"
+        sources.write_text("states:\n  - s3://bucket/prod.tfstate\n")
+
+        def _no_extra(*args: object, **kwargs: object) -> None:
+            raise SourceError(
+                "reading state from S3 needs the `aws` extra: install with `uv tool install 'dora-roi[aws]'`."
+            )
+
+        with mock.patch.object(cli_module, "fetch_sources", _no_extra):
+            result = runner.invoke(app, ["scan", "--sources", str(sources), "-o", str(tmp_path / "out")])
+
+        assert result.exit_code == 1
+        assert "dora-roi[aws]" in result.output
+        assert "install 'dora-roi'." not in result.output
+
+    def test_a_bracket_in_a_warning_is_not_eaten_either(self, tmp_path: Path) -> None:
+        overlay = tmp_path / "vendors.yaml"
+        overlay.write_text("providers:\n  nobody[x]:\n    legal_name: Nobody\n")
+        result = runner.invoke(app, ["scan", "-s", SAMPLE, "--overlay", str(overlay), "-o", str(tmp_path / "out")])
+        assert result.exit_code == 0
+        assert "nobody[x]" in result.output

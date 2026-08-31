@@ -22,6 +22,7 @@ from typing import Any
 
 import typer
 from rich.console import Console
+from rich.markup import escape
 from rich.table import Table
 
 from dora_roi import __version__
@@ -110,6 +111,23 @@ PERIMETER_WARNING = (
 console = Console()
 err = Console(stderr=True)
 
+
+def _plain(value: object) -> str:
+    """Text from outside the CLI, made safe to hand to rich.
+
+    Rich reads ``[…]`` as a style tag and deletes what it does not recognise.
+    Exception messages routinely contain square brackets, and the one users
+    actually hit is the worst possible case: the ImportError that says to
+    install ``dora-roi[aws]`` reaches the terminal as ``dora-roi``, telling
+    somebody already stuck to run the command that put them there.
+
+    So every value that did not come from this module is escaped before it is
+    interpolated. The ``[red]``/``[yellow]`` labels around it are ours and stay
+    markup.
+    """
+    return escape(str(value))
+
+
 app = typer.Typer(
     name="dora-roi",
     help="Prefill the DORA Register of Information from your infrastructure-as-code, and report what is still missing.",
@@ -136,7 +154,7 @@ def overlay_init(
 ) -> None:
     """Write a commented vendors.yaml, seeded with the providers the last scan found."""
     if to.exists() and not force:
-        err.print(f"[red]Error:[/red] {to} already exists. Pass --force to overwrite it.")
+        err.print(f"[red]Error:[/red] {_plain(to)} already exists. Pass --force to overwrite it.")
         raise typer.Exit(EXIT_USER_ERROR)
 
     names: list[str] = []
@@ -147,9 +165,14 @@ def overlay_init(
             names = [p["name"] for p in json.loads(inventory.read_text())["providers"]]
             resolved = _already_settled(output / "roi_prefill.json", names)
         except (json.JSONDecodeError, KeyError, TypeError) as e:
-            err.print(f"[yellow]Warning:[/yellow] could not read {inventory} ({e}); writing an empty template.")
+            err.print(
+                f"[yellow]Warning:[/yellow] could not read {_plain(inventory)} "
+                f"({_plain(e)}); writing an empty template."
+            )
     else:
-        err.print(f"[yellow]Warning:[/yellow] no {inventory} found. Run `dora-roi scan` first for a seeded template.")
+        err.print(
+            f"[yellow]Warning:[/yellow] no {_plain(inventory)} found. Run `dora-roi scan` first for a seeded template."
+        )
 
     to.write_text(overlay_template(names, resolved), encoding="utf-8")
     console.print(f"Wrote [bold]{to}[/bold] with {len(names)} provider block(s), all commented out.")
@@ -272,7 +295,7 @@ def export(
     except typer.Exit:
         raise
     except Exception as e:  # noqa: BLE001 - the CLI boundary is where unexpected stops
-        err.print(f"[red]Unexpected error:[/red] {type(e).__name__}: {e}")
+        err.print(f"[red]Unexpected error:[/red] {type(e).__name__}: {_plain(e)}")
         raise typer.Exit(EXIT_UNEXPECTED) from e
 
 
@@ -291,7 +314,7 @@ def _export(
     summary = summarise_findings(findings)
 
     for finding in [f for f in findings if f.severity is Severity.BLOCKING][:20]:
-        err.print(f"[red]BLOCKING[/red] {finding.template}.{finding.field} {finding.message}")
+        err.print(f"[red]BLOCKING[/red] {finding.template}.{finding.field} {_plain(finding.message)}")
     console.print(f"[red]{summary['blocking']} blocking[/red] · [yellow]{summary['warning']} warning[/yellow]")
 
     if check_only:
@@ -350,7 +373,7 @@ def check(
     step you are not ready for.
     """
     if fail_on not in {"none", "blocking", "any"}:
-        err.print(f"[red]Error:[/red] --fail-on must be none, blocking or any, not {fail_on!r}.")
+        err.print(f"[red]Error:[/red] --fail-on must be none, blocking or any, not {_plain(repr(fail_on))}.")
         raise typer.Exit(EXIT_USER_ERROR)
     try:
         _check(output, fail_on, gleif)
@@ -359,7 +382,7 @@ def check(
     except typer.Exit:
         raise
     except Exception as e:  # noqa: BLE001 - the CLI boundary is where unexpected stops
-        err.print(f"[red]Unexpected error:[/red] {type(e).__name__}: {e}")
+        err.print(f"[red]Unexpected error:[/red] {type(e).__name__}: {_plain(e)}")
         raise typer.Exit(EXIT_UNEXPECTED) from e
 
 
@@ -372,7 +395,7 @@ def _check(output: Path, fail_on: str, use_gleif: bool) -> None:
         try:
             client = GleifClient()
         except Exception as e:  # noqa: BLE001 - a GLEIF outage must not fail a check
-            err.print(f"[yellow]Warning:[/yellow] GLEIF unavailable, checking LEIs offline only ({e}).")
+            err.print(f"[yellow]Warning:[/yellow] GLEIF unavailable, checking LEIs offline only ({_plain(e)}).")
 
     try:
         findings = preflight(roi, gleif=client, unnamed_principals=unnamed_principals)
@@ -457,7 +480,7 @@ def scan(
     except typer.Exit:
         raise
     except Exception as e:  # noqa: BLE001 - the CLI boundary is where unexpected stops
-        err.print(f"[red]Unexpected error:[/red] {type(e).__name__}: {e}")
+        err.print(f"[red]Unexpected error:[/red] {type(e).__name__}: {_plain(e)}")
         err.print("[dim]This is a bug. Please open an issue with the command you ran.[/dim]")
         raise typer.Exit(EXIT_UNEXPECTED) from e
 
@@ -674,7 +697,7 @@ def _scan(
     if overlay_file is not None:
         overlay = load_overlay(overlay_file)
         for warning in apply_overlay(roi, overlay):
-            err.print(f"[yellow]Warning:[/yellow] {warning}")
+            err.print(f"[yellow]Warning:[/yellow] {_plain(warning)}")
 
     # After the overlay, never before: the provider code it carries is usually
     # the only one there is. B_05.02 keys on 0010/0020/0030/0050/0060, so a link
@@ -706,7 +729,7 @@ def _enrich_with_gleif(rows: list[ThirdPartyProvider]) -> None:
     try:
         client = GleifClient()
     except Exception as e:  # noqa: BLE001 - constructing a client must not kill a scan
-        err.print(f"[yellow]Warning:[/yellow] GLEIF unavailable, continuing without LEIs ({e}).")
+        err.print(f"[yellow]Warning:[/yellow] GLEIF unavailable, continuing without LEIs ({_plain(e)}).")
         return
 
     with client:
@@ -716,7 +739,9 @@ def _enrich_with_gleif(rows: list[ThirdPartyProvider]) -> None:
             try:
                 match = client.best_match(row.legal_name)
             except GleifError as e:
-                err.print(f"[yellow]Warning:[/yellow] GLEIF lookup for {row.legal_name!r} failed: {e}")
+                err.print(
+                    f"[yellow]Warning:[/yellow] GLEIF lookup for {_plain(repr(row.legal_name))} failed: {_plain(e)}"
+                )
                 continue
             if match is None:
                 continue
@@ -868,7 +893,7 @@ def _collect_aws(
     try:
         organization = collect_organization(profile=profile)
     except AwsError as e:
-        err.print(f"[yellow]Warning:[/yellow] AWS Organizations unavailable: {e}")
+        err.print(f"[yellow]Warning:[/yellow] AWS Organizations unavailable: {_plain(e)}")
     else:
         for account in organization.accounts:
             entity = GroupEntity(name=account.name, hierarchy=" / ".join(account.ou_path))
@@ -888,7 +913,7 @@ def _collect_aws(
         # else is a genuine bug in that function and must surface as one,
         # not be reported here as "Cost Explorer unavailable" and hidden from
         # the CLI's own "this is a bug" path.
-        err.print(f"[yellow]Warning:[/yellow] AWS Cost Explorer unavailable: {e}")
+        err.print(f"[yellow]Warning:[/yellow] AWS Cost Explorer unavailable: {_plain(e)}")
         sources.clickops_refused.append(f"cost explorer: {e}")
         report = None
 
@@ -1426,7 +1451,7 @@ def _print_perimeter(sources: _Sources, gleif: bool) -> None:
 
 
 def _fail(error: Exception) -> None:
-    err.print(f"[red]Error:[/red] {error}")
+    err.print(f"[red]Error:[/red] {_plain(error)}")
     raise typer.Exit(EXIT_USER_ERROR) from error
 
 

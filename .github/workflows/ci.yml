@@ -109,6 +109,14 @@ jobs:
           docker run --rm --entrypoint python dora-roi:ci -c \
             "from dora_roi.enrichment.mapping import load_mapping; assert len(load_mapping()) >= 20"
 
+      # The shipped image once carried neither extra, so every AWS path — S3
+      # state included — died on an ImportError that no check could see: they
+      # all run in `dev`, which has them. A field run found it, not the suite.
+      - name: The shipped image can actually reach AWS and Kubernetes
+        run: |
+          docker run --rm --entrypoint python dora-roi:ci -c \
+            "import boto3, kubernetes"
+
       - name: The wheel builds
         uses: docker/build-push-action@v7
         with:
